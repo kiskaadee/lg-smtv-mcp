@@ -8,11 +8,11 @@ from typing import Any, Literal, Protocol
 class WebSocketClosedError(Exception):
     """Raised when a WebSocket transport closes unexpectedly or is already closed."""
 
-    code: int
-    reason: str
-
     def __init__(self, code: int, reason: str = "") -> None:
-        raise NotImplementedError
+        message = f"WebSocket closed ({code}): {reason}" if reason else f"WebSocket closed ({code})"
+        super().__init__(message)
+        self.code = code
+        self.reason = reason
 
 
 class WebSocketTransport(Protocol):
@@ -61,9 +61,6 @@ class TvStatus:
     status: Literal["connected", "already_connected"]
     elapsed_ms: int
 
-    def __post_init__(self) -> None:
-        raise NotImplementedError
-
 
 @dataclass(frozen=True, slots=True)
 class TvStateSnapshot:
@@ -77,9 +74,6 @@ class TvStateSnapshot:
     foreground_app: str | None
     last_updated: float | None
 
-    def __post_init__(self) -> None:
-        raise NotImplementedError
-
 
 @dataclass(frozen=True, slots=True)
 class CaptureResult:
@@ -89,9 +83,6 @@ class CaptureResult:
     frame_sha256: str
     changed_since_last: bool
     size_bytes: int
-
-    def __post_init__(self) -> None:
-        raise NotImplementedError
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,9 +96,6 @@ class KeysResult:
     size_bytes: int | None = None
     capture_error: str | None = None
 
-    def __post_init__(self) -> None:
-        raise NotImplementedError
-
 
 @dataclass(frozen=True, slots=True)
 class TextResult:
@@ -119,6 +107,3 @@ class TextResult:
     changed_since_last: bool | None = None
     size_bytes: int | None = None
     capture_error: str | None = None
-
-    def __post_init__(self) -> None:
-        raise NotImplementedError

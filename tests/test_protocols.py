@@ -12,7 +12,6 @@ from lg_smtv_mcp.tv_core.protocols import (
 )
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: protocols")
 def test_websocket_closed_error_preserves_args_and_str_representation() -> None:
     err = WebSocketClosedError(1008, "Try Again Later (EWS)")
 
@@ -29,7 +28,6 @@ def test_websocket_closed_error_preserves_args_and_str_representation() -> None:
     assert "1000" in str(err_no_reason)
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: protocols")
 def test_result_dataclasses_are_frozen_and_expose_expected_fields() -> None:
     status = TvStatus(status="connected", elapsed_ms=120)
     snapshot = TvStateSnapshot(
