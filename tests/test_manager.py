@@ -383,3 +383,231 @@ async def test_manager_transitions_to_pairing_required_on_subscription_401(
 
     assert mgr.state is ConnectionState.PAIRING_REQUIRED
     await mgr.close()
+
+
+@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
+async def test_manager_ui_lock_times_out_with_lock_timeout(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path)
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _make_online_transport()
+
+    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,), ui_lock_timeout=0.02)
+    await mgr.start()
+    for _ in range(30):
+        if mgr.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    await mgr._ui_lock.acquire()  # pyright: ignore[reportPrivateUsage]
+    try:
+        with pytest.raises(TvError) as exc_info:
+            await mgr.screenshot()
+        assert exc_info.value.code is ErrorCode.LOCK_TIMEOUT
+    finally:
+        mgr._ui_lock.release()  # pyright: ignore[reportPrivateUsage]
+        await mgr.close()
+
+
+@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
+@pytest.mark.parametrize(
+    ("keys", "delay_ms", "settle_ms"),
+    [
+        ([], 250, 0),
+        (["UP"] * 21, 250, 0),
+        (["UP"], -1, 0),
+        (["UP"], 501, 0),
+        (["UP"], 0, -1),
+        (["UP"], 0, 2001),
+    ],
+)
+async def test_manager_send_keys_validates_bounds_with_invalid_argument(
+    tmp_path: Path,
+    keys: list[str],
+    delay_ms: int,
+    settle_ms: int,
+) -> None:
+    cfg = _make_config(tmp_path)
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _make_online_transport()
+
+    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
+    await mgr.start()
+    for _ in range(30):
+        if mgr.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    with pytest.raises(TvError) as exc_info:
+        await mgr.send_keys(keys, delay_ms=delay_ms, settle_ms=settle_ms)
+    assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+    await mgr.close()
+
+
+@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
+async def test_manager_send_keys_capture_returns_partial_success_when_capture_unavailable(
+    tmp_path: Path,
+) -> None:
+    cfg = _make_config(tmp_path)
+    pointer_ws = FakeWebSocketTransport()
+    ssap_ws = _make_online_transport(
+        on_request=lambda msg, ws: ws.push_json(
+            {
+                "type": "response",
+                "id": msg["id"],
+                "payload": {"returnValue": True, "socketPath": "wss://192.0.2.10:3001/ptr"},
+            }
+        )
+    )
+
+    async def connect_fn(url: str) -> FakeWebSocketTransport:
+        return pointer_ws if "/ptr" in url else ssap_ws
+
+    # Case 1: capture_client is None
+    mgr_none = TvManager(cfg, connect_fn=connect_fn, capture_client=None, backoff_steps=(10.0,))
+    await mgr_none.start()
+    for _ in range(30):
+        if mgr_none.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    res_none = await mgr_none.send_keys(["UP", "ENTER"], delay_ms=0, settle_ms=0, capture=True)
+    assert res_none.keys_sent is True
+    assert res_none.count == 2
+    assert res_none.capture_error is not None
+    assert "SCREENSHOT_UNAVAILABLE" in res_none.capture_error
+    await mgr_none.close()
+
+    # Case 2: capture_client raises SCREENSHOT_UNAVAILABLE
+    ssap_ws2 = _make_online_transport(
+        on_request=lambda msg, ws: ws.push_json(
+            {
+                "type": "response",
+                "id": msg["id"],
+                "payload": {"returnValue": True, "socketPath": "wss://192.0.2.10:3001/ptr"},
+            }
+        )
+    )
+
+    async def connect_fn2(url: str) -> FakeWebSocketTransport:
+        return pointer_ws if "/ptr" in url else ssap_ws2
+
+    failing_capturer = _FakeCapturer(
+        error=TvError(ErrorCode.SCREENSHOT_UNAVAILABLE, "Dev Mode expired")
+    )
+    mgr_err = TvManager(
+        cfg, connect_fn=connect_fn2, capture_client=failing_capturer, backoff_steps=(10.0,)
+    )
+    await mgr_err.start()
+    for _ in range(30):
+        if mgr_err.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    res_err = await mgr_err.send_keys(["DOWN"], delay_ms=0, settle_ms=0, capture=True)
+    assert res_err.keys_sent is True
+    assert res_err.count == 1
+    assert res_err.capture_error == "SCREENSHOT_UNAVAILABLE: Dev Mode expired"
+    await mgr_err.close()
+
+
+@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
+async def test_manager_screenshot_raises_unavailable_when_capture_client_is_none(
+    tmp_path: Path,
+) -> None:
+    cfg = _make_config(tmp_path)
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _make_online_transport()
+
+    mgr = TvManager(cfg, connect_fn=connect_fn, capture_client=None, backoff_steps=(10.0,))
+    await mgr.start()
+    for _ in range(30):
+        if mgr.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    with pytest.raises(TvError) as exc_info:
+        await mgr.screenshot()
+    assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
+    await mgr.close()
+
+
+@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
+async def test_manager_set_volume_enforces_max_volume_guardrail(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path, max_volume=35)
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+
+    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
+        sent_requests.append((msg["uri"], msg["payload"]))
+        ws.push_json({"type": "response", "id": msg["id"], "payload": {"returnValue": True}})
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _make_online_transport(on_request=on_request)
+
+    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
+    await mgr.start()
+    for _ in range(30):
+        if mgr.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    for bad_level in (-1, 36):
+        with pytest.raises(TvError) as exc_info:
+            await mgr.set_volume(bad_level)
+        assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+
+    await mgr.set_volume(20)
+    assert sent_requests == [("ssap://audio/setVolume", {"volume": 20})]
+    await mgr.close()
+
+
+@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
+async def test_manager_mvp_ssap_controls_launch_list_mute_and_turn_off(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path)
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+
+    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
+        uri = msg["uri"]
+        sent_requests.append((uri, msg["payload"]))
+        if uri == "ssap://com.webos.applicationManager/listLaunchPoints":
+            ws.push_json(
+                {
+                    "type": "response",
+                    "id": msg["id"],
+                    "payload": {
+                        "returnValue": True,
+                        "launchPoints": [{"id": "netflix", "title": "Netflix"}],
+                    },
+                }
+            )
+        else:
+            ws.push_json({"type": "response", "id": msg["id"], "payload": {"returnValue": True}})
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _make_online_transport(on_request=on_request)
+
+    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
+    await mgr.start()
+    for _ in range(30):
+        if mgr.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    await mgr.launch_app("youtube.leanback.v4", content_target="v=abc&t=10s")
+    apps = await mgr.list_apps()
+    await mgr.set_mute(True)
+    await mgr.turn_off()
+
+    assert apps == [{"id": "netflix", "title": "Netflix"}]
+    assert sent_requests == [
+        (
+            "ssap://system.launcher/launch",
+            {"id": "youtube.leanback.v4", "params": {"contentTarget": "v=abc&t=10s"}},
+        ),
+        ("ssap://com.webos.applicationManager/listLaunchPoints", {}),
+        ("ssap://audio/setMute", {"mute": True}),
+        ("ssap://system/turnOff", {}),
+    ]
+    await mgr.close()
