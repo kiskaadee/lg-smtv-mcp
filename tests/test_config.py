@@ -26,7 +26,7 @@ def _clear_tv_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
-def test_error_code_and_tv_error() -> None:
+def test_error_taxonomy_defines_codes_and_decouples_config_error() -> None:
     expected = {
         "TV_OFFLINE_STANDBY",
         "PAIRING_REQUIRED",
@@ -52,7 +52,9 @@ def test_error_code_and_tv_error() -> None:
     assert str(cfg_err) == "invalid TV_IP"
 
 
-def test_load_config_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_load_config_uses_expected_defaults_when_optional_vars_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     _clear_tv_env(monkeypatch)
     monkeypatch.setenv("TV_IP", "192.0.2.10")
 
@@ -108,7 +110,7 @@ def test_dotenv_fallback_does_not_overwrite_existing_env(
         ({"TV_IP": "192.0.2.10", "PORT": "abc"}, "PORT"),
     ],
 )
-def test_load_config_validation_errors(
+def test_load_config_rejects_invalid_env_values_with_config_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     env_overrides: dict[str, str],
@@ -134,7 +136,7 @@ def test_load_config_validation_errors(
         ({"tv_ip": "192.0.2.10", "wol_broadcast": "bad-ip"}, "WOL_BROADCAST"),
     ],
 )
-def test_tv_config_direct_instantiation_enforces_pydantic_validation(
+def test_tv_config_rejects_invalid_direct_arguments_with_config_error(
     kwargs: dict[str, object],
     expected_substr: str,
 ) -> None:
@@ -144,7 +146,9 @@ def test_tv_config_direct_instantiation_enforces_pydantic_validation(
     assert expected_substr in exc_info.value.message
 
 
-def test_allowed_hosts_comma_separated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_load_config_parses_comma_separated_allowed_hosts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     _clear_tv_env(monkeypatch)
     monkeypatch.setenv("TV_IP", "192.0.2.10")
     monkeypatch.setenv("ALLOWED_HOSTS", "tv.local, 192.0.2.5:8765 , , localhost")
