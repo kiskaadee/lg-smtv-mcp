@@ -12,9 +12,13 @@ Provisions Python 3.14, `websockets`, `ruff`, and `pyright` via [flake.nix](flak
 
 ## Historical PoC & Empirical Notes
 
-Initial feasibility probes and verified device findings (`65UR8750PSA` / `WebOS/4.1.0`) are archived in [`doc/poc/`](doc/poc/):
+Initial feasibility probes and verified device findings (`65UR8750PSA` / `WebOS/4.1.0`) are archived in [`docs/poc/`](docs/poc/):
 
-- [doc/poc/capabilities.md](doc/poc/capabilities.md) — Verified SSAP/DIAL endpoints, deep-link formats, `401` boundaries, and Developer Mode SSH screenshot pipeline.
-- [doc/poc/crunchyroll-e2e-experiment.md](doc/poc/crunchyroll-e2e-experiment.md) — Timed end-to-end vision-loop experiment (Crunchyroll → *Attack on Titan* Ep 1) and latency findings.
-- [doc/poc/discover.py](doc/poc/discover.py) — SSDP multicast probe (`--all` to list DIAL/DLNA/SSAP services and MAC address).
-- [doc/poc/tv_test.py](doc/poc/tv_test.py) — One-shot SSAP pairing + command runner.
+- [docs/poc/capabilities.md](docs/poc/capabilities.md) — Verified SSAP/DIAL endpoints, deep-link formats, `401` boundaries, and Developer Mode SSH screenshot pipeline.
+- [docs/poc/crunchyroll-e2e-experiment.md](docs/poc/crunchyroll-e2e-experiment.md) — Timed end-to-end vision-loop experiment (Crunchyroll → *Attack on Titan* Ep 1) and latency findings.
+- [docs/poc/discover.py](docs/poc/discover.py) — SSDP multicast probe (`--all` to list DIAL/DLNA/SSAP services and MAC address).
+- [docs/poc/tv_test.py](docs/poc/tv_test.py) — One-shot SSAP pairing + command runner.
+
+## Design & RFC
+
+- [docs/designs/lg-smtv-mcp.md](docs/designs/lg-smtv-mcp.md) — Architecture RFC for the `lg-smtv-mcp` server.
