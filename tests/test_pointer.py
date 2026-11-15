@@ -8,7 +8,6 @@ from lg_smtv_mcp.tv_core.pointer import BUTTON_ALLOWLIST, PointerClient
 from tests.conftest import FakeWebSocketTransport
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: pointer")
 async def test_pointer_normalizes_keys_to_uppercase_and_formats_frames() -> None:
     ws = FakeWebSocketTransport()
     ssap_calls: list[str] = []
@@ -33,7 +32,6 @@ async def test_pointer_normalizes_keys_to_uppercase_and_formats_frames() -> None
     ]
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: pointer")
 @pytest.mark.parametrize("bad_key", ["INVALID_KEY", "UP\nname:HOME", "ENTER\r", ""])
 async def test_pointer_rejects_unknown_keys_and_newlines_with_invalid_argument(
     bad_key: str,
@@ -55,7 +53,6 @@ async def test_pointer_rejects_unknown_keys_and_newlines_with_invalid_argument(
     assert ws.sent == []
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: pointer")
 async def test_pointer_paces_buttons_by_delay_ms(monkeypatch: pytest.MonkeyPatch) -> None:
     ws = FakeWebSocketTransport()
     sleeps: list[float] = []
@@ -78,7 +75,6 @@ async def test_pointer_paces_buttons_by_delay_ms(monkeypatch: pytest.MonkeyPatch
     assert sleeps == [pytest.approx(0.15), pytest.approx(0.15)]
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: pointer")
 async def test_pointer_retries_once_on_mid_batch_socket_drop() -> None:
     ws1 = FakeWebSocketTransport()
     ws2 = FakeWebSocketTransport()
