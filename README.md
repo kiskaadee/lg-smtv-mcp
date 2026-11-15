@@ -1,6 +1,6 @@
-# webos-testing
+# lg-smtv-mcp
 
-Testing LG webOS local network control (SSDP discovery, SSAP WebSocket RPC, DIAL) from Linux/Python.
+Model Context Protocol (MCP) server for local network control of LG Smart TVs (webOS) over SSAP WebSockets, Wake-on-LAN, and optional Developer Mode SSH screenshot capture.
 
 ## Setup
 
@@ -10,11 +10,10 @@ nix develop
 
 Provisions Python 3.14, `websockets`, `ruff`, and `pyright` via [flake.nix](flake.nix).
 
-## Scripts
+## Historical PoC & Empirical Notes
 
-- `discover.py` — SSDP multicast probe (`--all` to list DIAL/DLNA/SSAP services and MAC address).
-- `tv_test.py` — One-shot SSAP pairing + command runner (`toast`, `info`, `apps`, `foreground`, `inputs`, `audio`, `launch`, `vol-up`, `vol-down`, `mute`, `raw`).
+Initial feasibility probes and verified device findings (`65UR8750PSA` / `WebOS/4.1.0`) are archived in [`doc/poc/`](doc/poc/):
 
-## Documentation
-
-- [docs/capabilities.md](docs/capabilities.md) — Verified SSAP/DIAL capabilities, deep-link contracts, and boundaries observed on `65UR8750PSA` (`WebOS/4.1.0`).
+- [doc/poc/capabilities.md](doc/poc/capabilities.md) — Verified SSAP/DIAL endpoints, deep-link formats, `401` boundaries, and Developer Mode SSH screenshot pipeline.
+- [doc/poc/discover.py](doc/poc/discover.py) — SSDP multicast probe (`--all` to list DIAL/DLNA/SSAP services and MAC address).
+- [doc/poc/tv_test.py](doc/poc/tv_test.py) — One-shot SSAP pairing + command runner.

@@ -28,9 +28,11 @@ Empirical notes from probing `192.168.1.11` (`Ethernet`, MAC `7c:64:6c:94:d1:24`
 - **Deep-linking quirks observed**:
   - **YouTube (`youtube.leanback.v4`)**: Expects `{"contentTarget": "v=<id>&t=<seconds>s"}` (full `https://...` URLs were ignored). If cold-started onto the profile picker, a second launch switches to the video.
   - **Netflix (`netflix`)**: Expects `{"contentTarget": "m=https://www.netflix.com/title/<id>"}` (or `/watch/<episode_id>`). Without `m=`, Netflix hung on loading. Audio/subtitle track selection is not exposed via `params`.
-- **Screen capture (local only)**: `ssap://com.webos.service.capture/executeOneShot` with `{"path": "/tmp/test.jpg", "method": "DISPLAY", "format": "JPG"}` succeeded (`960x540`, `12754` bytes), **but**:
+- **Screen capture (via SSAP + Dev Mode SSH)**: `ssap://com.webos.service.capture/executeOneShot` with `{"path": "/tmp/test.jpg", "method": "DISPLAY", "format": "JPG"}` succeeded (`960x540`, `10410`–`12754` bytes):
   - Calling without `"path"` fails with `5 ERROR_NOT_ENOUGH_MEMORY`.
-  - `/tmp/test.jpg` is not served over `https://192.168.1.11:3001/tmp/...` (timed out); reading it off the TV requires **LG Developer Mode** SSH (port `9922`) or external HDMI capture.
+  - `/tmp/test.jpg` is not served over `https://192.168.1.11:3001/tmp/...` (timed out).
+  - **Verified workaround**: With **LG Developer Mode** + **Key Server** enabled (SSH on port `9922`, `ssh-rsa` host/pubkey algorithms enabled for the TV host), `scp webos-tv:/tmp/test.jpg .` transfers the `~10 KB` screenshot in `< 1s` (`1.1 MB/s`).
+  - Dev Mode shell environment observed: `uid=6739(prisoner) gid=5000(jailer)`, home `/media/developer`, `Linux LGwebOSTV 5.4.268-294.24.papikonda.2 #1 SMP PREEMPT ... aarch64 GNU/Linux` (`1222 MB` RAM).
 
 ### Blocked on Retail Firmware
 

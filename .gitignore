@@ -1,5 +1,8 @@
+.env
+.direnv
 __pycache__/
 *.pyc
 .ruff_cache/
 .client_key.json
 .tv_state.json
+*.jpg

@@ -1,5 +1,5 @@
 {
-  description = "LG webOS local control testing environment";
+  description = "LG Smart TV (webOS) MCP server and testing environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
