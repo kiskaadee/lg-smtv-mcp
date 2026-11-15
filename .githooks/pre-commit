@@ -8,5 +8,3 @@ if command -v ruff >/dev/null 2>&1 && command -v pyright >/dev/null 2>&1 && comm
 else
   nix develop --command bash -c "ruff check . && pyright && pytest"
 fi
-
-nix flake check

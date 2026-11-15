@@ -34,7 +34,15 @@
         pyproject = true;
         build-system = [ ps.setuptools ];
         dependencies = runtimeDeps;
-        nativeCheckInputs = [ ps.pytestCheckHook ] ++ testDeps;
+        nativeCheckInputs = [
+          ps.pytestCheckHook
+          pkgs.ruff
+          pkgs.pyright
+        ] ++ testDeps;
+        preCheck = ''
+          ruff check .
+          pyright
+        '';
       };
 
       devShells.${system}.default = pkgs.mkShell {

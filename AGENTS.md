@@ -42,9 +42,10 @@ The working tree represents the user's active work.
 
 ---
 
-## 5. Verification & Completion
+## 5. Verification, Hooks & CI Expectations
 
-Every task must be verified inside `nix develop` before declaring completion:
-1. Run linters, formatters, and type checks: `nix develop --command ruff check .` and `nix develop --command pyright`.
-2. Run test suites when tests are present: `nix develop --command pytest`.
-3. Report: (1) What changed, (2) Files modified/created, (3) Verification performed, (4) Unverified areas/risks.
+Every task and commit must pass automated verification inside `nix develop`:
+1. **Local Pre-Commit Hook (`.githooks/pre-commit`):** Configured automatically by `flake.nix` `shellHook` (`git config core.hooksPath .githooks`). Runs `ruff check .`, `pyright`, and `pytest` before every commit. Never bypass hooks with `--no-verify`.
+2. **TDD Red-Phase Commits (`@pytest.mark.xfail`):** When committing Red-phase tests before the feature implementation exists, provide typed symbol stubs (`raise NotImplementedError`) so `pyright` passes, and decorate unimplemented tests with `@pytest.mark.xfail(strict=True, reason="Red phase: ...")` so `pytest` and `.githooks/pre-commit` exit `0` while still failing if a Red test passes tautologically. Remove `xfail` in the Green-phase commit.
+3. **Server-Side Gitea Actions CI (`.gitea/workflows/ci.yaml`):** Runs `nix flake check` on every push and pull request targeting `main`, executing `ruff check .`, `pyright`, `pytestCheckHook`, and `buildPythonApplication` inside the isolated Nix sandbox. Verify `nix flake check` locally before opening or updating a pull request.
+4. **Completion Reporting:** Report: (1) What changed, (2) Files modified/created, (3) Verification performed, (4) Unverified areas/risks.
