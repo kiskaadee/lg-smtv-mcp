@@ -385,7 +385,6 @@ async def test_manager_transitions_to_pairing_required_on_subscription_401(
     await mgr.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
 async def test_manager_ui_lock_times_out_with_lock_timeout(tmp_path: Path) -> None:
     cfg = _make_config(tmp_path)
 
@@ -409,7 +408,6 @@ async def test_manager_ui_lock_times_out_with_lock_timeout(tmp_path: Path) -> No
         await mgr.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
 @pytest.mark.parametrize(
     ("keys", "delay_ms", "settle_ms"),
     [
@@ -445,7 +443,6 @@ async def test_manager_send_keys_validates_bounds_with_invalid_argument(
     await mgr.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
 async def test_manager_send_keys_capture_returns_partial_success_when_capture_unavailable(
     tmp_path: Path,
 ) -> None:
@@ -480,6 +477,7 @@ async def test_manager_send_keys_capture_returns_partial_success_when_capture_un
     await mgr_none.close()
 
     # Case 2: capture_client raises SCREENSHOT_UNAVAILABLE
+    pointer_ws2 = FakeWebSocketTransport()
     ssap_ws2 = _make_online_transport(
         on_request=lambda msg, ws: ws.push_json(
             {
@@ -491,7 +489,7 @@ async def test_manager_send_keys_capture_returns_partial_success_when_capture_un
     )
 
     async def connect_fn2(url: str) -> FakeWebSocketTransport:
-        return pointer_ws if "/ptr" in url else ssap_ws2
+        return pointer_ws2 if "/ptr" in url else ssap_ws2
 
     failing_capturer = _FakeCapturer(
         error=TvError(ErrorCode.SCREENSHOT_UNAVAILABLE, "Dev Mode expired")
@@ -512,7 +510,6 @@ async def test_manager_send_keys_capture_returns_partial_success_when_capture_un
     await mgr_err.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
 async def test_manager_screenshot_raises_unavailable_when_capture_client_is_none(
     tmp_path: Path,
 ) -> None:
@@ -534,7 +531,6 @@ async def test_manager_screenshot_raises_unavailable_when_capture_client_is_none
     await mgr.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
 async def test_manager_set_volume_enforces_max_volume_guardrail(tmp_path: Path) -> None:
     cfg = _make_config(tmp_path, max_volume=35)
     sent_requests: list[tuple[str, dict[str, Any]]] = []
@@ -563,7 +559,6 @@ async def test_manager_set_volume_enforces_max_volume_guardrail(tmp_path: Path) 
     await mgr.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager controls")
 async def test_manager_mvp_ssap_controls_launch_list_mute_and_turn_off(tmp_path: Path) -> None:
     cfg = _make_config(tmp_path)
     sent_requests: list[tuple[str, dict[str, Any]]] = []

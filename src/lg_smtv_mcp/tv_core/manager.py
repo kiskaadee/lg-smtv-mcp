@@ -5,15 +5,15 @@ import json
 import logging
 import socket
 import time
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import AsyncGenerator, Callable
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, cast
 
 from lg_smtv_mcp.config import TvConfig, require_mac
 from lg_smtv_mcp.errors import ConfigError, ErrorCode, TvError
-from lg_smtv_mcp.tv_core.pointer import PointerClient
+from lg_smtv_mcp.tv_core.pointer import PointerClient, normalize_button_keys
 from lg_smtv_mcp.tv_core.protocols import (
     CaptureResult,
     FrameCapturer,
@@ -368,6 +368,46 @@ class TvManager:
             self._tv_state.foreground_app = app_id
         self._tv_state.last_updated = time.time()
 
+    def _require_ssap(self) -> SsapClient:
+        if self.state is ConnectionState.PAIRING_REQUIRED:
+            raise TvError(
+                ErrorCode.PAIRING_REQUIRED,
+                "TV requires pairing; run pair CLI and reload client key",
+            )
+        if self.state is not ConnectionState.CONNECTED or self._ssap is None:
+            raise TvError(ErrorCode.TV_OFFLINE_STANDBY, "TV is offline or in standby")
+        return self._ssap
+
+    def _require_pointer(self) -> PointerClient:
+        self._require_ssap()
+        if self._pointer is None:
+            raise TvError(ErrorCode.TV_OFFLINE_STANDBY, "Pointer client is not connected")
+        return self._pointer
+
+    @asynccontextmanager
+    async def _acquire_ui_lock(self) -> AsyncGenerator[None]:
+        try:
+            await asyncio.wait_for(self._ui_lock.acquire(), timeout=self._ui_lock_timeout)
+        except TimeoutError as exc:
+            raise TvError(
+                ErrorCode.LOCK_TIMEOUT,
+                f"Timed out waiting {self._ui_lock_timeout:.0f}s for UI lock",
+            ) from exc
+        try:
+            yield
+        finally:
+            self._ui_lock.release()
+
+    async def _capture_optional(self, ssap: SsapClient) -> tuple[CaptureResult | None, str | None]:
+        if self._capture_client is None:
+            return None, "SCREENSHOT_UNAVAILABLE: Developer Mode SSH is not configured"
+        try:
+            return await self._capture_client.capture_frame(ssap.request), None
+        except TvError as exc:
+            if exc.code is ErrorCode.SCREENSHOT_UNAVAILABLE:
+                return None, str(exc)
+            raise
+
     async def send_keys(
         self,
         keys: list[str],
@@ -376,7 +416,41 @@ class TvManager:
         capture: bool = False,
     ) -> KeysResult:
         """Validate, serialize, and send pointer button keys with optional capture."""
-        raise NotImplementedError
+        if not (1 <= len(keys) <= 20):
+            raise TvError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"keys must contain between 1 and 20 items, got {len(keys)}",
+            )
+        if not (0 <= delay_ms <= 500):
+            raise TvError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"delay_ms must be between 0 and 500, got {delay_ms}",
+            )
+        if not (0 <= settle_ms <= 2000):
+            raise TvError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"settle_ms must be between 0 and 2000, got {settle_ms}",
+            )
+        normalize_button_keys(keys)
+
+        ssap = self._require_ssap()
+        pointer = self._require_pointer()
+
+        async with self._acquire_ui_lock():
+            count = await pointer.send_buttons(keys, delay_ms=delay_ms)
+            if not capture:
+                return KeysResult(keys_sent=True, count=count)
+            if settle_ms > 0:
+                await asyncio.sleep(settle_ms / 1000.0)
+            cap, cap_err = await self._capture_optional(ssap)
+            return KeysResult(
+                keys_sent=True,
+                count=count,
+                frame_sha256=cap.frame_sha256 if cap is not None else None,
+                changed_since_last=cap.changed_since_last if cap is not None else None,
+                size_bytes=cap.size_bytes if cap is not None else None,
+                capture_error=cap_err,
+            )
 
     async def type_text(
         self,
@@ -385,11 +459,41 @@ class TvManager:
         capture: bool = False,
     ) -> TextResult:
         """Send IME text input with optional enter key and screenshot capture."""
-        raise NotImplementedError
+        if not (1 <= len(text) <= 500):
+            raise TvError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"text length must be between 1 and 500 characters, got {len(text)}",
+            )
+        ssap = self._require_ssap()
+        async with self._acquire_ui_lock():
+            await ssap.request(
+                "ssap://com.webos.service.ime/insertText",
+                {"text": text, "replace": 0},
+            )
+            if send_enter:
+                await ssap.request("ssap://com.webos.service.ime/sendEnterKey", {})
+            if not capture:
+                return TextResult(text_sent=True, enter_sent=send_enter)
+            cap, cap_err = await self._capture_optional(ssap)
+            return TextResult(
+                text_sent=True,
+                enter_sent=send_enter,
+                frame_sha256=cap.frame_sha256 if cap is not None else None,
+                changed_since_last=cap.changed_since_last if cap is not None else None,
+                size_bytes=cap.size_bytes if cap is not None else None,
+                capture_error=cap_err,
+            )
 
     async def screenshot(self) -> CaptureResult:
         """Acquire ui_lock and capture a screenshot via Developer Mode SFTP."""
-        raise NotImplementedError
+        ssap = self._require_ssap()
+        async with self._acquire_ui_lock():
+            if self._capture_client is None:
+                raise TvError(
+                    ErrorCode.SCREENSHOT_UNAVAILABLE,
+                    "Developer Mode SSH is not configured",
+                )
+            return await self._capture_client.capture_frame(ssap.request)
 
     async def launch_app(
         self,
@@ -398,32 +502,80 @@ class TvManager:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Launch an installed webOS app with optional deep-link parameters."""
-        raise NotImplementedError
+        ssap = self._require_ssap()
+        merged_params = dict(params or {})
+        if content_target is not None:
+            merged_params["contentTarget"] = content_target
+        payload: dict[str, Any] = {"id": app_id}
+        if merged_params:
+            payload["params"] = merged_params
+        return await ssap.request("ssap://system.launcher/launch", payload)
 
     async def list_apps(self) -> list[dict[str, str]]:
         """Return installed launch points as [{id, title}]."""
-        raise NotImplementedError
+        ssap = self._require_ssap()
+        resp = await ssap.request("ssap://com.webos.applicationManager/listLaunchPoints", {})
+        raw_points = resp.get("launchPoints", [])
+        if not isinstance(raw_points, list):
+            return []
+        apps: list[dict[str, str]] = []
+        for item_raw in cast(list[Any], raw_points):
+            if isinstance(item_raw, dict):
+                item = cast(dict[str, Any], item_raw)
+                apps.append({"id": str(item.get("id", "")), "title": str(item.get("title", ""))})
+        return apps
 
     async def set_volume(self, level: int) -> dict[str, Any]:
         """Set TV volume within [0, config.max_volume]."""
-        raise NotImplementedError
+        if level < 0 or level > self._config.max_volume:
+            raise TvError(
+                ErrorCode.INVALID_ARGUMENT,
+                f"Volume {level} must be between 0 and {self._config.max_volume}",
+            )
+        ssap = self._require_ssap()
+        return await ssap.request("ssap://audio/setVolume", {"volume": level})
 
     async def set_mute(self, muted: bool) -> dict[str, Any]:
         """Set TV mute state."""
-        raise NotImplementedError
+        ssap = self._require_ssap()
+        return await ssap.request("ssap://audio/setMute", {"mute": muted})
 
     async def list_inputs(self) -> list[dict[str, Any]]:
         """Return external inputs as [{id, label, connected}]."""
-        raise NotImplementedError
+        ssap = self._require_ssap()
+        resp = await ssap.request("ssap://tv/getExternalInputList", {})
+        raw_devices = resp.get("devices", [])
+        if not isinstance(raw_devices, list):
+            return []
+        inputs: list[dict[str, Any]] = []
+        for item_raw in cast(list[Any], raw_devices):
+            if isinstance(item_raw, dict):
+                item = cast(dict[str, Any], item_raw)
+                inputs.append(
+                    {
+                        "id": str(item.get("id", "")),
+                        "label": str(item.get("label", "")),
+                        "connected": bool(item.get("connected", False)),
+                    }
+                )
+        return inputs
 
     async def switch_input(self, input_id: str) -> dict[str, Any]:
         """Switch active external input."""
-        raise NotImplementedError
+        ssap = self._require_ssap()
+        return await ssap.request("ssap://tv/switchInput", {"inputId": input_id})
 
     async def turn_off(self) -> dict[str, Any]:
         """Power off the TV into standby."""
-        raise NotImplementedError
+        ssap = self._require_ssap()
+        return await ssap.request("ssap://system/turnOff", {})
 
     async def raw_ssap(self, uri: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Forward a raw SSAP request when enabled by configuration."""
-        raise NotImplementedError
+        if not self._config.enable_raw_ssap:
+            raise TvError(
+                ErrorCode.INVALID_ARGUMENT,
+                "raw_ssap is disabled (ENABLE_RAW_SSAP=false)",
+            )
+        ssap = self._require_ssap()
+        return await ssap.request(uri, payload)
