@@ -8,7 +8,7 @@ Model Context Protocol (MCP) server for local network control of LG Smart TVs (w
 nix develop
 ```
 
-Provisions Python 3.14, `websockets`, `ruff`, and `pyright` via [flake.nix](flake.nix).
+Provisions Python 3.14, `websockets`, `mcp`, `pydantic`, `asyncssh`, `uvicorn`, `httpx`, `pytest`, `ruff`, and `pyright` via [flake.nix](flake.nix), and configures `.githooks/` (`ruff check`, `ruff format --check`, `pyright`, `pytest`).
 
 ## Historical PoC & Empirical Notes
 

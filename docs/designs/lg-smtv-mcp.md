@@ -76,8 +76,8 @@ All runtime code lives under `src/lg_smtv_mcp/`, separating the transport/protoc
 
 | Module | Responsibility |
 | :--- | :--- |
-| `src/lg_smtv_mcp/config.py` *(planned)* | Typed `TvConfig` loaded from env vars / `.env` (`TV_IP`, `TV_MAC`, `WOL_BROADCAST`, `CLIENT_KEY_PATH`, `SSH_KEY_PATH`, `WEBOS_SSH_PASSPHRASE`, `SSH_KNOWN_HOSTS_PATH`, `HOST`, `PORT`, `ALLOWED_HOSTS`, `MCP_BEARER_TOKEN`, `MAX_VOLUME`, `ENABLE_RAW_SSAP`). |
-| `src/lg_smtv_mcp/errors.py` *(planned)* | Typed domain exceptions and error codes (`TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `SCREENSHOT_UNAVAILABLE`, `LOCK_TIMEOUT`, `WAKE_TIMEOUT`, `COMMAND_FAILED`, `INVALID_ARGUMENT`). |
+| [`src/lg_smtv_mcp/config.py`](../../src/lg_smtv_mcp/config.py) | Frozen Pydantic v2 `TvConfig` (`extra="forbid"`) loaded from env vars / `.env` (`TV_IP`, `TV_MAC`, `WOL_BROADCAST`, `CLIENT_KEY_PATH`, `SSH_KEY_PATH`, `WEBOS_SSH_PASSPHRASE`, `SSH_KNOWN_HOSTS_PATH`, `HOST`, `PORT`, `ALLOWED_HOSTS`, `MCP_BEARER_TOKEN`, `MAX_VOLUME`, `ENABLE_RAW_SSAP`), raising `ConfigError` on invalid operator config. |
+| [`src/lg_smtv_mcp/errors.py`](../../src/lg_smtv_mcp/errors.py) | `ConfigError` for startup/config failures and `TvError(ErrorCode, message)` for runtime TV/tool errors (`TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `SCREENSHOT_UNAVAILABLE`, `LOCK_TIMEOUT`, `WAKE_TIMEOUT`, `COMMAND_FAILED`, `INVALID_ARGUMENT`). |
 | `src/lg_smtv_mcp/tv_core/protocols.py` *(planned)* | Thin Python `Protocol` interfaces (`WebSocketTransport`, `WebSocketConnectFn`, `WebSocketClosedError`, `CaptureTransport`) enabling offline contract tests. |
 | `src/lg_smtv_mcp/tv_core/ssap.py` *(planned)* | `SsapClient`: single background reader task routing frames by `msg["id"]` to `asyncio.Future`s and `subscribe` callbacks; `PERMISSIONS` constant; `register` + `1008` detection; WebSocket keepalive and pending-`Future` cleanup on disconnect. |
 | `src/lg_smtv_mcp/tv_core/pointer.py` *(planned)* | `PointerClient`: acquires `getPointerInputSocket`, normalizes/validates keys, sends plain-text `type:button` frames, and automatically re-acquires the socket if dropped. |
@@ -264,12 +264,12 @@ Implementation proceeds in three incremental phases, each ending with its listed
 #### 1. `flake.nix` (Modify)
 
 *   **Type / Scope:** Nix package and development shell configuration.
-*   **Proposed Changes:** Expose `packages.${system}.default` via `pkgs.python3Packages.buildPythonApplication` (`pyproject = true`, `build-system = [ ps.setuptools ]`, `dependencies = [ ps.websockets ps.mcp ps.asyncssh ps.uvicorn ]`). Update `devShells.${system}.default` to include `ps.websockets`, `ps.mcp`, `ps.asyncssh`, `ps.uvicorn`, `ps.httpx`, `ps.pytest`, `ps.pytest-asyncio`, `pkgs.pyright`, and `pkgs.ruff`, with `shellHook = ''export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"'';` so `import lg_smtv_mcp` and `python -m lg_smtv_mcp` work inside `nix develop` without rebuilding.
+*   **Proposed Changes:** Expose `packages.${system}.default` via `pkgs.python3Packages.buildPythonApplication` (`pyproject = true`, `build-system = [ ps.setuptools ]`, single-sourced `runtimeDeps` `[ ps.websockets ps.mcp ps.pydantic ps.asyncssh ps.uvicorn ]`, `testDeps` `[ ps.httpx ps.pytest ps.pytest-asyncio ]`, and `preCheck` running `ruff check .`, `ruff format --check .`, `pyright`, plus `pytestCheckHook`). Update `devShells.${system}.default` to include `pythonEnv` (`runtimeDeps ++ testDeps`), `pkgs.pyright`, and `pkgs.ruff`, with `shellHook` exporting `PYTHONPATH="$PWD/src:${PYTHONPATH:-}"` and configuring `git config core.hooksPath .githooks`.
 
 #### 2. `pyproject.toml` (Create)
 
 *   **Type / Scope:** Python package metadata, build, and tool configuration.
-*   **Proposed Changes:** Set `[build-system]` to `setuptools.build_meta`, define `lg-smtv-mcp` under `src/` with `[project].dependencies = ["websockets", "mcp", "asyncssh", "uvicorn"]`, console script `lg-smtv-mcp = "lg_smtv_mcp.cli:main"`, `[tool.pytest.ini_options]` (`asyncio_mode = "auto"`, `pythonpath = ["src"]`), `[tool.ruff]`, and `[tool.pyright]` (`include = ["src", "tests"]`, `typeCheckingMode = "standard"`).
+*   **Proposed Changes:** Set `[build-system]` to `setuptools.build_meta`, define `lg-smtv-mcp` (`requires-python = ">=3.14"`) under `src/` with `[project].dependencies = ["websockets", "mcp", "pydantic", "asyncssh", "uvicorn"]`, console script `lg-smtv-mcp = "lg_smtv_mcp.cli:main"`, `[tool.pytest.ini_options]` (`asyncio_mode = "auto"`, `pythonpath = ["src"]`), `[tool.ruff]` (including `TID251` banning `from __future__ import annotations` in `src/` and `tests/`), and `[tool.pyright]` (`include = ["src", "tests"]`, `typeCheckingMode = "strict"`, `pythonVersion = "3.14"`).
 
 #### 3. `.gitignore` and `.env.example` (Modify / Create)
 
@@ -279,14 +279,14 @@ Implementation proceeds in three incremental phases, each ending with its listed
 #### 4. `src/lg_smtv_mcp/__init__.py`, `src/lg_smtv_mcp/__main__.py`, and `src/lg_smtv_mcp/errors.py` (Create)
 
 *   **Type / Scope:** Package root, `python -m lg_smtv_mcp` entrypoint, and typed domain error taxonomy.
-*   **Proposed Changes:** Add `__main__.py` delegating to `cli.main()`. In `errors.py`, define `ErrorCode(StrEnum)` (`TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `SCREENSHOT_UNAVAILABLE`, `LOCK_TIMEOUT`, `WAKE_TIMEOUT`, `COMMAND_FAILED`, `INVALID_ARGUMENT`) and `TvError(Exception)` carrying `code: ErrorCode` and `message: str` for uniform MCP error mapping.
+*   **Proposed Changes:** Add `__main__.py` delegating to `cli.main()`. In `errors.py`, define `ConfigError(Exception)` for startup/operator configuration failures, `ErrorCode(StrEnum)` (`TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `SCREENSHOT_UNAVAILABLE`, `LOCK_TIMEOUT`, `WAKE_TIMEOUT`, `COMMAND_FAILED`, `INVALID_ARGUMENT`), and `TvError(Exception)` carrying `code: ErrorCode` and `message: str` for uniform MCP error mapping.
 
 #### 5. `src/lg_smtv_mcp/config.py` (Create)
 
 *   **Type / Scope:** Runtime configuration loader and stdlib `.env` parser.
-*   **Proposed Changes:** Implement a minimal stdlib `.env` parser in `load_config()` that populates unset `os.environ` keys from `.env` (if present). Define frozen `TvConfig` dataclass validating `TV_IP` (required), `0 <= MAX_VOLUME <= 100` (default `40`), `1 <= PORT <= 65535` (default `8765`), comma-separated `ALLOWED_HOSTS`, `WOL_BROADCAST` (default `255.255.255.255`), `SSH_KNOWN_HOSTS_PATH`, `ENABLE_RAW_SSAP` (default `False`), and command-specific requirements (`MCP_BEARER_TOKEN` required only for `serve --transport streamable-http`; `TV_MAC` required when `tv_wake` is invoked).
+*   **Proposed Changes:** Implement a minimal stdlib `.env` parser in `load_config()` that populates unset `os.environ` keys from `.env` (if present). Define frozen Pydantic v2 `TvConfig` (`BaseModel`, `ConfigDict(frozen=True, extra="forbid")`, remapping `ValidationError` to `ConfigError`) validating `TV_IP` (required IPv4), `0 <= MAX_VOLUME <= 100` (default `40`), `1 <= PORT <= 65535` (default `8765`), comma-separated `ALLOWED_HOSTS`, `WOL_BROADCAST` (IPv4, default `255.255.255.255`), `SSH_KNOWN_HOSTS_PATH`, `ENABLE_RAW_SSAP` (default `False`), and command-specific requirements (`require_bearer_token()` for `serve --transport streamable-http`; `require_mac()` for `tv_wake`), all raising `ConfigError` on invalid configuration.
 
-*   **Phase 1 Checkpoint:** `nix develop --command python -c "import lg_smtv_mcp"` and `nix develop --command ruff check . && nix develop --command pyright`.
+*   **Phase 1 Checkpoint:** `nix develop --command python -c "import lg_smtv_mcp"`, `nix develop --command bash -c "ruff check . && ruff format --check . && pyright && pytest"`, and `nix flake check`.
 
 ---
 
