@@ -10,7 +10,6 @@ from lg_smtv_mcp.tv_core.ssap import PERMISSIONS, SsapClient
 from tests.conftest import FakeWebSocketTransport
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: ssap")
 async def test_ssap_register_sends_all_permissions_even_with_saved_client_key() -> None:
     def on_send(raw: str, ws: FakeWebSocketTransport) -> None:
         msg = json.loads(raw)
@@ -40,7 +39,6 @@ async def test_ssap_register_sends_all_permissions_even_with_saved_client_key() 
     assert reg_msg["payload"]["manifest"]["permissions"] == list(PERMISSIONS)
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: ssap")
 async def test_ssap_request_demuxes_interleaved_subscribe_push_frame() -> None:
     sub_id_holder: list[str] = []
 
@@ -92,7 +90,6 @@ async def test_ssap_request_demuxes_interleaved_subscribe_push_frame() -> None:
     assert updates[-1]["mute"] is True
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: ssap")
 async def test_ssap_connect_maps_1008_and_timeout_to_tv_offline_standby() -> None:
     transport_1008 = FakeWebSocketTransport()
     transport_1008.push_close(1008, "Try Again Later (EWS)")
@@ -114,7 +111,6 @@ async def test_ssap_connect_maps_1008_and_timeout_to_tv_offline_standby() -> Non
     assert exc_timeout.value.code is ErrorCode.TV_OFFLINE_STANDBY
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: ssap")
 async def test_ssap_register_maps_prompt_to_pairing_required() -> None:
     def on_send(raw: str, ws: FakeWebSocketTransport) -> None:
         msg = json.loads(raw)
@@ -139,7 +135,6 @@ async def test_ssap_register_maps_prompt_to_pairing_required() -> None:
     assert transport.closed is True
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: ssap")
 async def test_ssap_request_maps_return_value_false_and_401_to_domain_errors() -> None:
     def on_send(raw: str, ws: FakeWebSocketTransport) -> None:
         msg = json.loads(raw)
@@ -183,7 +178,6 @@ async def test_ssap_request_maps_return_value_false_and_401_to_domain_errors() -
     await client.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: ssap")
 async def test_ssap_reader_loop_finally_fails_pending_futures_with_standby_error() -> None:
     def on_send(raw: str, ws: FakeWebSocketTransport) -> None:
         msg = json.loads(raw)
