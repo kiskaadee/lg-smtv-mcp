@@ -1,7 +1,5 @@
 """Runtime configuration loader and stdlib .env parser."""
 
-from __future__ import annotations
-
 import os
 from dataclasses import dataclass
 from pathlib import Path

@@ -1,7 +1,5 @@
 """Typed domain error taxonomy for lg-smtv-mcp."""
 
-from __future__ import annotations
-
 from enum import StrEnum
 
 

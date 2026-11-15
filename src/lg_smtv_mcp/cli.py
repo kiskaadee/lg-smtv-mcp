@@ -1,7 +1,5 @@
 """CLI entrypoint stub for lg-smtv-mcp (expanded in Issue #3)."""
 
-from __future__ import annotations
-
 from collections.abc import Sequence
 
 
