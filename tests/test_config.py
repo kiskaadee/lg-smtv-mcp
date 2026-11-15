@@ -48,9 +48,7 @@ def test_error_code_and_tv_error() -> None:
     assert "bad input" in str(err)
 
 
-def test_load_config_defaults(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_load_config_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _clear_tv_env(monkeypatch)
     monkeypatch.setenv("TV_IP", "192.0.2.10")
 
@@ -78,11 +76,7 @@ def test_dotenv_fallback_does_not_overwrite_existing_env(
     _clear_tv_env(monkeypatch)
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "# comment line\n"
-        "TV_IP=192.0.2.20\n"
-        "PORT='9000'\n"
-        'HOST="0.0.0.0"\n'
-        "ENABLE_RAW_SSAP=true\n",
+        "# comment line\nTV_IP=192.0.2.20\nPORT='9000'\nHOST=\"0.0.0.0\"\nENABLE_RAW_SSAP=true\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("TV_IP", "192.0.2.99")
@@ -125,9 +119,7 @@ def test_load_config_validation_errors(
     assert expected_substr in exc_info.value.message
 
 
-def test_allowed_hosts_comma_separated(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_allowed_hosts_comma_separated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _clear_tv_env(monkeypatch)
     monkeypatch.setenv("TV_IP", "192.0.2.10")
     monkeypatch.setenv("ALLOWED_HOSTS", "tv.local, 192.0.2.5:8765 , , localhost")
@@ -180,9 +172,7 @@ def test_require_mac_rejects_missing_or_blank(
     assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
 
 
-def test_require_mac_returns_trimmed_value(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_require_mac_returns_trimmed_value(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _clear_tv_env(monkeypatch)
     monkeypatch.setenv("TV_IP", "192.0.2.10")
     monkeypatch.setenv("TV_MAC", " AA:BB:CC:DD:EE:FF ")

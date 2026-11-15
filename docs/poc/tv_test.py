@@ -205,9 +205,7 @@ async def verify_subscriptions(ip: str, port: int, key_file: Path) -> dict[str, 
             )
         )
         await ws.send(
-            json.dumps(
-                {"id": "req_info", "type": "request", "uri": "ssap://system/getSystemInfo"}
-            )
+            json.dumps({"id": "req_info", "type": "request", "uri": "ssap://system/getSystemInfo"})
         )
 
         frames: list[dict[str, Any]] = []
