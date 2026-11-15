@@ -3,8 +3,9 @@ set -euo pipefail
 
 if command -v ruff >/dev/null 2>&1 && command -v pyright >/dev/null 2>&1 && command -v pytest >/dev/null 2>&1; then
   ruff check .
+  ruff format --check .
   pyright
   pytest
 else
-  nix develop --command bash -c "ruff check . && pyright && pytest"
+  nix develop --command bash -c "ruff check . && ruff format --check . && pyright && pytest"
 fi

@@ -41,6 +41,7 @@
         ] ++ testDeps;
         preCheck = ''
           ruff check .
+          ruff format --check .
           pyright
         '';
       };
