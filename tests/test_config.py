@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from lg_smtv_mcp.config import TvConfig, load_config, require_bearer_token, require_mac
-from lg_smtv_mcp.errors import ErrorCode, TvError
+from lg_smtv_mcp.errors import ConfigError, ErrorCode, TvError
 
 
 def _clear_tv_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -44,6 +44,12 @@ def test_error_code_and_tv_error() -> None:
     assert err.code is ErrorCode.INVALID_ARGUMENT
     assert err.message == "bad input"
     assert "bad input" in str(err)
+
+    cfg_err = ConfigError("invalid TV_IP")
+    assert isinstance(cfg_err, Exception)
+    assert not isinstance(cfg_err, TvError)
+    assert cfg_err.message == "invalid TV_IP"
+    assert str(cfg_err) == "invalid TV_IP"
 
 
 def test_load_config_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -92,6 +98,8 @@ def test_dotenv_fallback_does_not_overwrite_existing_env(
     [
         ({}, "TV_IP"),
         ({"TV_IP": "   "}, "TV_IP"),
+        ({"TV_IP": "999.999.999.999"}, "TV_IP"),
+        ({"TV_IP": "192.0.2.10", "WOL_BROADCAST": "not-an-ip"}, "WOL_BROADCAST"),
         ({"TV_IP": "192.0.2.10", "MAX_VOLUME": "-1"}, "MAX_VOLUME"),
         ({"TV_IP": "192.0.2.10", "MAX_VOLUME": "101"}, "MAX_VOLUME"),
         ({"TV_IP": "192.0.2.10", "MAX_VOLUME": "loud"}, "MAX_VOLUME"),
@@ -110,10 +118,29 @@ def test_load_config_validation_errors(
     for k, v in env_overrides.items():
         monkeypatch.setenv(k, v)
 
-    with pytest.raises(TvError) as exc_info:
+    with pytest.raises(ConfigError) as exc_info:
         load_config(env_path=tmp_path / "missing.env")
 
-    assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+    assert expected_substr in exc_info.value.message
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_substr"),
+    [
+        ({"tv_ip": ""}, "TV_IP"),
+        ({"tv_ip": "not-an-ip"}, "TV_IP"),
+        ({"tv_ip": "192.0.2.10", "port": 70000}, "PORT"),
+        ({"tv_ip": "192.0.2.10", "max_volume": 150}, "MAX_VOLUME"),
+        ({"tv_ip": "192.0.2.10", "wol_broadcast": "bad-ip"}, "WOL_BROADCAST"),
+    ],
+)
+def test_tv_config_direct_instantiation_enforces_pydantic_validation(
+    kwargs: dict[str, object],
+    expected_substr: str,
+) -> None:
+    with pytest.raises(ConfigError) as exc_info:
+        TvConfig(**kwargs)  # type: ignore[arg-type]
+
     assert expected_substr in exc_info.value.message
 
 
@@ -137,10 +164,10 @@ def test_require_bearer_token_rejects_missing_or_blank(
         monkeypatch.setenv("MCP_BEARER_TOKEN", token)
 
     cfg = load_config(env_path=tmp_path / "missing.env")
-    with pytest.raises(TvError) as exc_info:
+    with pytest.raises(ConfigError) as exc_info:
         require_bearer_token(cfg)
 
-    assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+    assert "MCP_BEARER_TOKEN" in exc_info.value.message
 
 
 def test_require_bearer_token_returns_trimmed_value(
@@ -164,10 +191,10 @@ def test_require_mac_rejects_missing_or_blank(
         monkeypatch.setenv("TV_MAC", mac)
 
     cfg = load_config(env_path=tmp_path / "missing.env")
-    with pytest.raises(TvError) as exc_info:
+    with pytest.raises(ConfigError) as exc_info:
         require_mac(cfg)
 
-    assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+    assert "TV_MAC" in exc_info.value.message
 
 
 def test_require_mac_returns_trimmed_value(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

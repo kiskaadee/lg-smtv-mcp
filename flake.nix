@@ -14,6 +14,7 @@
       runtimeDeps = [
         ps.websockets
         ps.mcp
+        ps.pydantic
         ps.asyncssh
         ps.uvicorn
       ];

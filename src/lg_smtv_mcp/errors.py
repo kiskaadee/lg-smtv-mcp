@@ -22,3 +22,11 @@ class TvError(Exception):
         super().__init__(f"{code.value}: {message}")
         self.code = code
         self.message = message
+
+
+class ConfigError(Exception):
+    """Raised when runtime configuration is missing or fails validation."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
