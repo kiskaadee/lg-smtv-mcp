@@ -108,6 +108,7 @@ class TvManager:
         self._wake_done_event = asyncio.Event()
         self._disconnect_code = ErrorCode.TV_OFFLINE_STANDBY
         self._wake_requested = False
+        self._reload_requested = False
         self._wake_failure: TvError | None = None
 
     async def start(self) -> None:
@@ -140,6 +141,7 @@ class TvManager:
         loaded = self._try_load_client_key()
         if loaded is not None:
             self._client_key = loaded
+            self._reload_requested = True
             if self.state is ConnectionState.PAIRING_REQUIRED:
                 self._wake_or_reload_event.set()
 
@@ -189,31 +191,27 @@ class TvManager:
         wait_failed = asyncio.create_task(self._wake_done_event.wait())
         try:
             async with asyncio.timeout(self._wake_timeout):
-                done, pending = await asyncio.wait(
+                done, _ = await asyncio.wait(
                     {wait_connected, wait_failed},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                for task in pending:
-                    task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
                 if wait_failed in done and self._wake_failure is not None:
                     raise self._wake_failure
         except TimeoutError as exc:
-            for task in (wait_connected, wait_failed):
-                if not task.done():
-                    task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
-            self._wake_requested = False
             if self.state is ConnectionState.WAKING:
                 self.state = ConnectionState.STANDBY_OFFLINE
             raise TvError(
                 ErrorCode.WAKE_TIMEOUT,
                 f"TV did not become ready within {self._wake_timeout:.0f}s",
             ) from exc
+        finally:
+            self._wake_requested = False
+            for task in (wait_connected, wait_failed):
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
 
-        self._wake_requested = False
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return TvStatus(status="connected", elapsed_ms=elapsed_ms)
 
@@ -233,6 +231,7 @@ class TvManager:
                 )
                 if exc.code is ErrorCode.PAIRING_REQUIRED:
                     self.state = ConnectionState.PAIRING_REQUIRED
+                    self._wake_requested = False
                     self._wake_failure = exc
                     self._wake_done_event.set()
                     backoff_idx = await self._wait_backoff(backoff_idx)
@@ -258,31 +257,48 @@ class TvManager:
 
             is_pairing = self._disconnect_code is ErrorCode.PAIRING_REQUIRED
             await self._teardown_transports(close_capture=not is_pairing)
+            if is_pairing:
+                self._wake_requested = False
             self.state = (
                 ConnectionState.PAIRING_REQUIRED if is_pairing else ConnectionState.STANDBY_OFFLINE
             )
             backoff_idx = await self._wait_backoff(backoff_idx)
 
     async def _wait_backoff(self, backoff_idx: int) -> int:
-        if self._stopping:
-            return backoff_idx
-        delay = self._backoff_steps[min(backoff_idx, len(self._backoff_steps) - 1)]
-        next_idx = min(backoff_idx + 1, len(self._backoff_steps) - 1)
-        self._wake_or_reload_event.clear()
-        if self._wake_requested:
-            return 0
-        try:
-            await asyncio.wait_for(self._wake_or_reload_event.wait(), timeout=delay)
-        except TimeoutError:
-            pass
+        current_idx = backoff_idx
+        while not self._stopping:
+            if self._wake_requested:
+                return 0
+            if self.state is ConnectionState.PAIRING_REQUIRED and self._reload_requested:
+                self._reload_requested = False
+                return current_idx
 
-        if self.state is ConnectionState.PAIRING_REQUIRED and not self._wake_requested:
-            reloaded = self._try_load_client_key()
-            if reloaded is not None:
-                self._client_key = reloaded
-            else:
-                return await self._wait_backoff(next_idx)
-        return next_idx
+            delay = self._backoff_steps[min(current_idx, len(self._backoff_steps) - 1)]
+            next_idx = min(current_idx + 1, len(self._backoff_steps) - 1)
+            self._wake_or_reload_event.clear()
+
+            # Re-check after clearing the event so concurrent wake/reload signals are not lost.
+            if self._wake_requested:
+                return 0
+            if self.state is ConnectionState.PAIRING_REQUIRED and self._reload_requested:
+                self._reload_requested = False
+                return current_idx
+
+            try:
+                await asyncio.wait_for(self._wake_or_reload_event.wait(), timeout=delay)
+            except TimeoutError:
+                pass
+
+            if self.state is ConnectionState.PAIRING_REQUIRED and not self._wake_requested:
+                self._reload_requested = False
+                reloaded = self._try_load_client_key()
+                if reloaded is not None:
+                    self._client_key = reloaded
+                    return next_idx
+                current_idx = next_idx
+                continue
+            return next_idx
+        return current_idx
 
     async def _connect_and_subscribe(self) -> None:
         if self._client_key is None:

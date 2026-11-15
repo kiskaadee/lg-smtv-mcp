@@ -28,9 +28,15 @@ def _make_config(tmp_path: Path, **overrides: Any) -> TvConfig:
 
 
 class _FakeCapturer:
-    def __init__(self, *, error: TvError | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        error: TvError | None = None,
+        gate: asyncio.Event | None = None,
+    ) -> None:
         self.closed_count = 0
         self.error = error
+        self.gate = gate
         self.calls = 0
 
     async def capture_frame(
@@ -39,6 +45,8 @@ class _FakeCapturer:
     ) -> CaptureResult:
         _ = ssap_request_fn
         self.calls += 1
+        if self.gate is not None:
+            await self.gate.wait()
         if self.error is not None:
             raise self.error
         return CaptureResult(
@@ -387,24 +395,34 @@ async def test_manager_transitions_to_pairing_required_on_subscription_401(
 
 async def test_manager_ui_lock_times_out_with_lock_timeout(tmp_path: Path) -> None:
     cfg = _make_config(tmp_path)
+    gate = asyncio.Event()
+    capturer = _FakeCapturer(gate=gate)
 
     async def connect_fn(_url: str) -> FakeWebSocketTransport:
         return _make_online_transport()
 
-    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,), ui_lock_timeout=0.02)
+    mgr = TvManager(
+        cfg,
+        connect_fn=connect_fn,
+        capture_client=capturer,
+        backoff_steps=(10.0,),
+        ui_lock_timeout=0.02,
+    )
     await mgr.start()
     for _ in range(30):
         if mgr.get_state().connected:
             break
         await asyncio.sleep(0.01)
 
-    await mgr._ui_lock.acquire()  # pyright: ignore[reportPrivateUsage]
+    holder = asyncio.create_task(mgr.screenshot())
+    await asyncio.sleep(0.01)
     try:
         with pytest.raises(TvError) as exc_info:
             await mgr.screenshot()
         assert exc_info.value.code is ErrorCode.LOCK_TIMEOUT
     finally:
-        mgr._ui_lock.release()  # pyright: ignore[reportPrivateUsage]
+        gate.set()
+        await holder
         await mgr.close()
 
 
@@ -606,3 +624,176 @@ async def test_manager_mvp_ssap_controls_launch_list_mute_and_turn_off(tmp_path:
         ("ssap://system/turnOff", {}),
     ]
     await mgr.close()
+
+
+async def test_manager_wake_pairing_failure_clears_wake_requested_and_respects_backoff(
+    tmp_path: Path,
+) -> None:
+    cfg = _make_config(tmp_path)
+    connect_attempts = 0
+    return_prompt = False
+
+    def on_send(raw: str, ws: FakeWebSocketTransport) -> None:
+        msg = json.loads(raw)
+        if msg["type"] == "register":
+            if return_prompt:
+                ws.push_json(
+                    {
+                        "type": "response",
+                        "id": msg["id"],
+                        "payload": {"pairingType": "PROMPT", "returnValue": True},
+                    }
+                )
+            else:
+                ws.push_close(1008, "Try Again Later (EWS)")
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        nonlocal connect_attempts
+        connect_attempts += 1
+        return FakeWebSocketTransport(on_send=on_send)
+
+    mgr = TvManager(
+        cfg,
+        connect_fn=connect_fn,
+        wol_fn=_noop_wol,
+        backoff_steps=(1.0,),
+        wake_poll_interval=0.01,
+        wake_timeout=1.0,
+    )
+    await mgr.start()
+    await asyncio.sleep(0.02)
+    assert mgr.state is ConnectionState.STANDBY_OFFLINE
+
+    return_prompt = True
+    with pytest.raises(TvError) as exc_info:
+        await mgr.wake()
+    assert exc_info.value.code is ErrorCode.PAIRING_REQUIRED
+
+    attempts_after_wake = connect_attempts
+    await asyncio.sleep(0.05)
+    assert connect_attempts == attempts_after_wake
+    await mgr.close()
+
+
+async def test_manager_type_text_bounds_and_capture_partial_success(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path)
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+
+    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
+        sent_requests.append((msg["uri"], msg["payload"]))
+        ws.push_json({"type": "response", "id": msg["id"], "payload": {"returnValue": True}})
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _make_online_transport(on_request=on_request)
+
+    failing_capturer = _FakeCapturer(
+        error=TvError(ErrorCode.SCREENSHOT_UNAVAILABLE, "Dev Mode expired")
+    )
+    mgr = TvManager(
+        cfg,
+        connect_fn=connect_fn,
+        capture_client=failing_capturer,
+        backoff_steps=(10.0,),
+    )
+    await mgr.start()
+    for _ in range(30):
+        if mgr.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    for bad_text in ("", "x" * 501):
+        with pytest.raises(TvError) as exc_info:
+            await mgr.type_text(bad_text)
+        assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+
+    res = await mgr.type_text("anime", send_enter=True, capture=True)
+    assert res.text_sent is True
+    assert res.enter_sent is True
+    assert res.capture_error == "SCREENSHOT_UNAVAILABLE: Dev Mode expired"
+    assert sent_requests == [
+        ("ssap://com.webos.service.ime/insertText", {"text": "anime", "replace": 0}),
+        ("ssap://com.webos.service.ime/sendEnterKey", {}),
+    ]
+    await mgr.close()
+
+
+async def test_manager_list_inputs_and_switch_input(tmp_path: Path) -> None:
+    cfg = _make_config(tmp_path)
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+
+    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
+        uri = msg["uri"]
+        sent_requests.append((uri, msg["payload"]))
+        if uri == "ssap://tv/getExternalInputList":
+            ws.push_json(
+                {
+                    "type": "response",
+                    "id": msg["id"],
+                    "payload": {
+                        "returnValue": True,
+                        "devices": [{"id": "HDMI_1", "label": "HDMI 1", "connected": True}],
+                    },
+                }
+            )
+        else:
+            ws.push_json({"type": "response", "id": msg["id"], "payload": {"returnValue": True}})
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _make_online_transport(on_request=on_request)
+
+    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
+    await mgr.start()
+    for _ in range(30):
+        if mgr.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    inputs = await mgr.list_inputs()
+    await mgr.switch_input("HDMI_1")
+
+    assert inputs == [{"id": "HDMI_1", "label": "HDMI 1", "connected": True}]
+    assert sent_requests == [
+        ("ssap://tv/getExternalInputList", {}),
+        ("ssap://tv/switchInput", {"inputId": "HDMI_1"}),
+    ]
+    await mgr.close()
+
+
+async def test_manager_raw_ssap_respects_enable_raw_ssap_gate(tmp_path: Path) -> None:
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _make_online_transport(
+            on_request=lambda msg, ws: ws.push_json(
+                {"type": "response", "id": msg["id"], "payload": {"returnValue": True, "ok": 1}}
+            )
+        )
+
+    mgr_disabled = TvManager(
+        _make_config(tmp_path, enable_raw_ssap=False),
+        connect_fn=connect_fn,
+        backoff_steps=(10.0,),
+    )
+    await mgr_disabled.start()
+    for _ in range(30):
+        if mgr_disabled.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    with pytest.raises(TvError) as exc_info:
+        await mgr_disabled.raw_ssap("ssap://system/getSystemInfo")
+    assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+    await mgr_disabled.close()
+
+    mgr_enabled = TvManager(
+        _make_config(tmp_path, enable_raw_ssap=True),
+        connect_fn=connect_fn,
+        backoff_steps=(10.0,),
+    )
+    await mgr_enabled.start()
+    for _ in range(30):
+        if mgr_enabled.get_state().connected:
+            break
+        await asyncio.sleep(0.01)
+
+    resp = await mgr_enabled.raw_ssap("ssap://system/getSystemInfo", {"x": 1})
+    assert resp == {"returnValue": True, "ok": 1}
+    await mgr_enabled.close()
