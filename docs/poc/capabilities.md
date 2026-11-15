@@ -39,12 +39,11 @@ Empirical notes from probing `192.168.1.11` (`Ethernet`, MAC `7c:64:6c:94:d1:24`
 - **Power lifecycle (`turnOff` + Wake-on-LAN)**:
   - `ssap://system/turnOff` cleanly powers the TV into standby (`returnValue: true`).
   - Sending a standard WoL magic packet (`0xff * 6 + mac * 16`) over UDP broadcast (`255.255.255.255:9`) to Ethernet MAC `7c:64:6c:94:d1:24` successfully wakes and powers on the TV from standby.
-  - While the TV is in standby/booting, `wss://192.168.1.11:3001` accepts the WebSocket upgrade and immediately closes with `1008 (policy violation) Try Again Later (EWS)`—providing an instant fail-fast / boot-polling signal without waiting for a TCP timeout.
+  - While the TV is in warm standby/booting right after `turnOff`, `wss://192.168.1.11:3001` accepts the WebSocket upgrade and immediately closes with `1008 (policy violation) Try Again Later (EWS)`. In deep cold standby (after extended power-off), the TCP/TLS opening handshake times out (`TimeoutError`), and cold-booting via WoL until `wss://:3001` completes TLS + `register` takes `~30–35s` (requiring `open_timeout >= 3–4s` and a `~45s` wake timeout budget).
+- **Subscriptions & `msg["id"]` interleaving (`"type": "subscribe"`)**:
+  - Verified `"type": "subscribe"` on both `ssap://com.webos.applicationManager/getForegroundAppInfo` (`{"subscribed": true, "returnValue": true, "appId": "com.webos.app.livetv", ...}`) and `ssap://audio/getStatus` (`{"returnValue": true, "mute": false, "volume": 27, "volumeStatus": {"soundOutput": "tv_speaker", "maxVolume": 100, "muteStatus": false, ...}}`).
+  - When sending a mutating request (`ssap://audio/setMute`) on the same WebSocket, the TV pushes the updated `sub_audio` subscription frame **before** the `req_mute_on` / `req_mute_off` response frame—confirming that persistent clients must demultiplex incoming frames by `msg["id"]`.
 
 ### Blocked on Retail Firmware
 
 - **`ssap://settings/getSystemSettings`**: Returned `401 insufficient permissions` (low-level picture/network/system settings are restricted to signed LG system apps).
-
-### Not Yet Tested on This Device
-
-- **Subscriptions**: `"type": "subscribe"` on `audio/getStatus` and `getForegroundAppInfo` for a persistent client.

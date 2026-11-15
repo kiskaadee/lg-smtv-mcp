@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import socket
 import ssl
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +44,19 @@ COMMANDS: dict[str, tuple[str, dict[str, Any]]] = {
     "vol-down": ("ssap://audio/volumeDown", {}),
     "mute": ("ssap://audio/setMute", {"mute": True}),
     "unmute": ("ssap://audio/setMute", {"mute": False}),
+    "turn-off": ("ssap://system/turnOff", {}),
 }
+
+
+def send_wol(mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> None:
+    """Broadcast a Wake-on-LAN magic packet for the given MAC address."""
+    clean_hex = mac.replace(":", "").replace("-", "")
+    if len(clean_hex) != 12:
+        raise ValueError(f"Invalid MAC address: {mac}")
+    magic = b"\xff" * 6 + bytes.fromhex(clean_hex) * 16
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.sendto(magic, (broadcast, port))
 
 
 def build_ssl_context() -> ssl.SSLContext:
@@ -122,6 +136,114 @@ async def pair_and_send(
         return json.loads(await ws.recv())
 
 
+async def wake_and_wait(
+    ip: str,
+    port: int,
+    mac: str,
+    key_file: Path,
+    broadcast: str = "255.255.255.255",
+    timeout_s: float = 45.0,
+) -> dict[str, Any]:
+    """Send WoL magic packet and poll SSAP until registration succeeds."""
+    send_wol(mac, broadcast=broadcast)
+    start = time.monotonic()
+    last_error = ""
+    attempts = 0
+    keys = load_client_keys(key_file)
+    saved_key = keys.get(ip)
+    scheme = "wss" if port == 3001 else "ws"
+    ssl_ctx = build_ssl_context() if scheme == "wss" else None
+
+    while (time.monotonic() - start) < timeout_s:
+        attempts += 1
+        try:
+            async with websockets.connect(
+                f"{scheme}://{ip}:{port}", ssl=ssl_ctx, open_timeout=4.0
+            ) as ws:
+                await ws.send(json.dumps(build_register_payload(saved_key)))
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=3.0))
+                if msg.get("type") == "registered":
+                    return {
+                        "status": "connected",
+                        "attempts": attempts,
+                        "elapsed_ms": round((time.monotonic() - start) * 1000),
+                        "last_error": last_error,
+                    }
+                last_error = f"unexpected frame: {msg.get('type')}"
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        await asyncio.sleep(1.0)
+
+    raise TimeoutError(f"Wake timed out after {attempts} attempts ({last_error})")
+
+
+async def verify_subscriptions(ip: str, port: int, key_file: Path) -> dict[str, Any]:
+    """Verify SSAP subscribe frames, push updates on state change, and id multiplexing."""
+    keys = load_client_keys(key_file)
+    saved_key = keys.get(ip)
+    scheme = "wss" if port == 3001 else "ws"
+    ssl_ctx = build_ssl_context() if scheme == "wss" else None
+
+    async with websockets.connect(
+        f"{scheme}://{ip}:{port}", ssl=ssl_ctx, ping_interval=10, ping_timeout=5
+    ) as ws:
+        await ws.send(json.dumps(build_register_payload(saved_key)))
+        reg = json.loads(await asyncio.wait_for(ws.recv(), timeout=3.0))
+        if reg.get("type") != "registered":
+            raise RuntimeError(f"Expected registered, got: {reg.get('type')}")
+
+        await ws.send(
+            json.dumps({"id": "sub_audio", "type": "subscribe", "uri": "ssap://audio/getStatus"})
+        )
+        await ws.send(
+            json.dumps(
+                {
+                    "id": "sub_fg",
+                    "type": "subscribe",
+                    "uri": "ssap://com.webos.applicationManager/getForegroundAppInfo",
+                }
+            )
+        )
+        await ws.send(
+            json.dumps(
+                {"id": "req_info", "type": "request", "uri": "ssap://system/getSystemInfo"}
+            )
+        )
+
+        frames: list[dict[str, Any]] = []
+        for _ in range(3):
+            frames.append(json.loads(await asyncio.wait_for(ws.recv(), timeout=3.0)))
+
+        # Trigger a mute toggle to verify sub_audio pushes a second frame automatically
+        await ws.send(
+            json.dumps(
+                {
+                    "id": "req_mute_on",
+                    "type": "request",
+                    "uri": "ssap://audio/setMute",
+                    "payload": {"mute": True},
+                }
+            )
+        )
+        for _ in range(2):
+            frames.append(json.loads(await asyncio.wait_for(ws.recv(), timeout=3.0)))
+
+        await ws.send(
+            json.dumps(
+                {
+                    "id": "req_mute_off",
+                    "type": "request",
+                    "uri": "ssap://audio/setMute",
+                    "payload": {"mute": False},
+                }
+            )
+        )
+        for _ in range(2):
+            frames.append(json.loads(await asyncio.wait_for(ws.recv(), timeout=3.0)))
+
+        return {"frames": frames}
+
+
 def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
     parser = argparse.ArgumentParser(
@@ -155,12 +277,29 @@ def parse_args() -> argparse.Namespace:
     raw_p = sub.add_parser("raw", help="Send an arbitrary SSAP URI + JSON payload.")
     raw_p.add_argument("uri", help="SSAP URI (e.g. ssap://system/getSystemInfo)")
     raw_p.add_argument("--payload", default="{}", help="JSON payload string")
+
+    wake_p = sub.add_parser("wake", help="Wake TV via WoL and poll until SSAP registers.")
+    wake_p.add_argument("--mac", required=True, help="TV MAC address (XX:XX:XX:XX:XX:XX)")
+    wake_p.add_argument("--broadcast", default="255.255.255.255", help="WoL broadcast IP")
+
+    sub.add_parser("subscribe-test", help="Verify SSAP subscriptions and id multiplexing.")
     return parser.parse_args()
 
 
 def main() -> None:
     """CLI entry point."""
     args = parse_args()
+    if args.command == "wake":
+        response = asyncio.run(
+            wake_and_wait(args.ip, args.port, args.mac, args.key_file, broadcast=args.broadcast)
+        )
+        print(json.dumps(response, indent=2))
+        return
+    if args.command == "subscribe-test":
+        response = asyncio.run(verify_subscriptions(args.ip, args.port, args.key_file))
+        print(json.dumps(response, indent=2))
+        return
+
     if args.command == "toast":
         uri = "ssap://system.notifications/createToast"
         payload: dict[str, Any] = {"message": args.message}
