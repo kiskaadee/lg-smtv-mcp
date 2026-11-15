@@ -11,6 +11,49 @@ from pydantic_core import PydanticCustomError
 from lg_smtv_mcp.errors import ConfigError
 
 
+def _parse_ipv4(env_name: str, value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise PydanticCustomError(
+            "invalid_ipv4",
+            "{name} is required and must be a valid IPv4 address",
+            {"name": env_name},
+        )
+    cleaned = value.strip()
+    try:
+        ipaddress.IPv4Address(cleaned)
+    except ValueError as exc:
+        raise PydanticCustomError(
+            "invalid_ipv4",
+            "{name} must be a valid IPv4 address, got {ip!r}",
+            {"name": env_name, "ip": cleaned},
+        ) from exc
+    return cleaned
+
+
+def _parse_bounded_int(env_name: str, value: Any, *, min_val: int, max_val: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise PydanticCustomError(
+            "invalid_int",
+            "{name} must be an integer between {min_val} and {max_val}, got {val!r}",
+            {"name": env_name, "min_val": min_val, "max_val": max_val, "val": value},
+        )
+    try:
+        parsed = int(value.strip()) if isinstance(value, str) else value
+    except ValueError as exc:
+        raise PydanticCustomError(
+            "invalid_int",
+            "{name} must be an integer between {min_val} and {max_val}, got {val!r}",
+            {"name": env_name, "min_val": min_val, "max_val": max_val, "val": value},
+        ) from exc
+    if not (min_val <= parsed <= max_val):
+        raise PydanticCustomError(
+            "int_out_of_range",
+            "{name} must be between {min_val} and {max_val}, got {val}",
+            {"name": env_name, "min_val": min_val, "max_val": max_val, "val": parsed},
+        )
+    return parsed
+
+
 class TvConfig(BaseModel):
     """Validated runtime configuration for lg-smtv-mcp."""
 
@@ -40,90 +83,22 @@ class TvConfig(BaseModel):
     @field_validator("tv_ip", mode="before")
     @classmethod
     def _validate_tv_ip(cls, value: Any) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise PydanticCustomError(
-                "missing_tv_ip",
-                "TV_IP is required and must be a non-empty IPv4 address",
-            )
-        cleaned = value.strip()
-        try:
-            ipaddress.IPv4Address(cleaned)
-        except ValueError as exc:
-            raise PydanticCustomError(
-                "invalid_tv_ip",
-                "TV_IP must be a valid IPv4 address, got {tv_ip!r}",
-                {"tv_ip": cleaned},
-            ) from exc
-        return cleaned
+        return _parse_ipv4("TV_IP", value)
 
     @field_validator("wol_broadcast", mode="before")
     @classmethod
     def _validate_wol_broadcast(cls, value: Any) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise PydanticCustomError(
-                "invalid_wol_broadcast",
-                "WOL_BROADCAST must be a valid IPv4 address",
-            )
-        cleaned = value.strip()
-        try:
-            ipaddress.IPv4Address(cleaned)
-        except ValueError as exc:
-            raise PydanticCustomError(
-                "invalid_wol_broadcast",
-                "WOL_BROADCAST must be a valid IPv4 address, got {ip!r}",
-                {"ip": cleaned},
-            ) from exc
-        return cleaned
+        return _parse_ipv4("WOL_BROADCAST", value)
 
     @field_validator("port", mode="before")
     @classmethod
     def _validate_port(cls, value: Any) -> int:
-        if isinstance(value, bool):
-            raise PydanticCustomError(
-                "invalid_port",
-                "PORT must be an integer between 1 and 65535, got {val!r}",
-                {"val": value},
-            )
-        try:
-            parsed = int(value.strip()) if isinstance(value, str) else int(value)
-        except (ValueError, TypeError) as exc:
-            raise PydanticCustomError(
-                "invalid_port",
-                "PORT must be an integer between 1 and 65535, got {val!r}",
-                {"val": value},
-            ) from exc
-        if not (1 <= parsed <= 65535):
-            raise PydanticCustomError(
-                "invalid_port_range",
-                "PORT must be between 1 and 65535, got {val}",
-                {"val": parsed},
-            )
-        return parsed
+        return _parse_bounded_int("PORT", value, min_val=1, max_val=65535)
 
     @field_validator("max_volume", mode="before")
     @classmethod
     def _validate_max_volume(cls, value: Any) -> int:
-        if isinstance(value, bool):
-            raise PydanticCustomError(
-                "invalid_max_volume",
-                "MAX_VOLUME must be an integer between 0 and 100, got {val!r}",
-                {"val": value},
-            )
-        try:
-            parsed = int(value.strip()) if isinstance(value, str) else int(value)
-        except (ValueError, TypeError) as exc:
-            raise PydanticCustomError(
-                "invalid_max_volume",
-                "MAX_VOLUME must be an integer between 0 and 100, got {val!r}",
-                {"val": value},
-            ) from exc
-        if not (0 <= parsed <= 100):
-            raise PydanticCustomError(
-                "invalid_max_volume_range",
-                "MAX_VOLUME must be between 0 and 100, got {val}",
-                {"val": parsed},
-            )
-        return parsed
+        return _parse_bounded_int("MAX_VOLUME", value, min_val=0, max_val=100)
 
 
 def _load_dotenv(env_path: Path) -> None:

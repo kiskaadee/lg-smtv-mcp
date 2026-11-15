@@ -38,6 +38,9 @@ select = ["E", "F", "I", "UP", "B", "TID"]
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "__future__.annotations".msg = "Python 3.14 evaluates annotations lazily by default (PEP 649); omit from __future__ import annotations."
 
+[tool.ruff.format]
+exclude = ["docs/poc/**"]
+
 [tool.pyright]
 include = ["src", "tests"]
 typeCheckingMode = "strict"

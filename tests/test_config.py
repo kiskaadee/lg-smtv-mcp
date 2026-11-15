@@ -132,7 +132,9 @@ def test_load_config_rejects_invalid_env_values_with_config_error(
         ({"tv_ip": ""}, "TV_IP"),
         ({"tv_ip": "not-an-ip"}, "TV_IP"),
         ({"tv_ip": "192.0.2.10", "port": 70000}, "PORT"),
+        ({"tv_ip": "192.0.2.10", "port": 8000.5}, "PORT"),
         ({"tv_ip": "192.0.2.10", "max_volume": 150}, "MAX_VOLUME"),
+        ({"tv_ip": "192.0.2.10", "max_volume": 12.5}, "MAX_VOLUME"),
         ({"tv_ip": "192.0.2.10", "wol_broadcast": "bad-ip"}, "WOL_BROADCAST"),
     ],
 )
