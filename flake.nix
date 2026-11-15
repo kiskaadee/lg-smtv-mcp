@@ -9,29 +9,32 @@
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
-      pythonEnv = pkgs.python3.withPackages (ps: [
+      ps = pkgs.python3Packages;
+
+      runtimeDeps = [
         ps.websockets
         ps.mcp
         ps.asyncssh
         ps.uvicorn
+      ];
+
+      testDeps = [
         ps.httpx
         ps.pytest
         ps.pytest-asyncio
-      ]);
+      ];
+
+      pythonEnv = pkgs.python3.withPackages (_: runtimeDeps ++ testDeps);
     in
     {
-      packages.${system}.default = pkgs.python3Packages.buildPythonApplication {
+      packages.${system}.default = ps.buildPythonApplication {
         pname = "lg-smtv-mcp";
         version = "0.1.0";
         src = ./.;
         pyproject = true;
-        build-system = [ pkgs.python3Packages.setuptools ];
-        dependencies = with pkgs.python3Packages; [
-          websockets
-          mcp
-          asyncssh
-          uvicorn
-        ];
+        build-system = [ ps.setuptools ];
+        dependencies = runtimeDeps;
+        nativeCheckInputs = [ ps.pytestCheckHook ] ++ testDeps;
       };
 
       devShells.${system}.default = pkgs.mkShell {
@@ -42,6 +45,9 @@
         ];
         shellHook = ''
           export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
+          if [ -d .git ] && [ -d .githooks ]; then
+            git config core.hooksPath .githooks
+          fi
         '';
       };
     };
