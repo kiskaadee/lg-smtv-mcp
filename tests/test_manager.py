@@ -99,7 +99,6 @@ def _make_online_transport(
     return FakeWebSocketTransport(on_send=on_send)
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager lifecycle")
 async def test_manager_uses_stepped_reconnect_backoff_and_tears_down_capture_on_standby(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -144,7 +143,6 @@ async def test_manager_uses_stepped_reconnect_backoff_and_tears_down_capture_on_
     assert capturer.closed_count >= 1
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager lifecycle")
 async def test_manager_wake_coalesces_concurrent_calls_and_handles_connected_and_pairing(
     tmp_path: Path,
 ) -> None:
@@ -222,7 +220,6 @@ def _noop_wol(_mac: str, _broadcast: str, _port: int) -> None:
     pass
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager lifecycle")
 async def test_manager_wake_raises_wake_timeout_when_tv_never_comes_online(
     tmp_path: Path,
 ) -> None:
@@ -251,7 +248,6 @@ async def test_manager_wake_raises_wake_timeout_when_tv_never_comes_online(
     await mgr.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager lifecycle")
 async def test_manager_reloads_client_key_on_sighup_and_stays_in_pairing_on_bad_json(
     tmp_path: Path,
 ) -> None:
@@ -303,7 +299,6 @@ async def test_manager_reloads_client_key_on_sighup_and_stays_in_pairing_on_bad_
     await mgr.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager lifecycle")
 async def test_manager_caches_subscribe_state_and_returns_lock_free_offline_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -357,7 +352,6 @@ async def test_manager_caches_subscribe_state_and_returns_lock_free_offline_snap
     await mgr.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: manager lifecycle")
 async def test_manager_transitions_to_pairing_required_on_subscription_401(
     tmp_path: Path,
 ) -> None:

@@ -1,11 +1,19 @@
 """Single-owner TV connection state machine, subscribe cache, and control surface."""
 
+import asyncio
+import json
+import logging
+import socket
+import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
-from lg_smtv_mcp.config import TvConfig
+from lg_smtv_mcp.config import TvConfig, require_mac
+from lg_smtv_mcp.errors import ConfigError, ErrorCode, TvError
+from lg_smtv_mcp.tv_core.pointer import PointerClient
 from lg_smtv_mcp.tv_core.protocols import (
     CaptureResult,
     FrameCapturer,
@@ -15,7 +23,9 @@ from lg_smtv_mcp.tv_core.protocols import (
     TvStatus,
     WebSocketConnectFn,
 )
-from lg_smtv_mcp.tv_core.ssap import websockets_connect
+from lg_smtv_mcp.tv_core.ssap import SsapClient, websockets_connect
+
+logger = logging.getLogger(__name__)
 
 
 class ConnectionState(StrEnum):
@@ -41,7 +51,18 @@ class TvState:
 
 def send_wol(mac: str, broadcast_addr: str = "255.255.255.255", port: int = 9) -> None:
     """Broadcast a Wake-on-LAN magic packet for the given MAC address."""
-    raise NotImplementedError
+    clean_hex = mac.replace(":", "").replace("-", "").strip()
+    if len(clean_hex) != 12:
+        raise ConfigError(f"Invalid MAC address for Wake-on-LAN: {mac!r}")
+    try:
+        mac_bytes = bytes.fromhex(clean_hex)
+    except ValueError as exc:
+        raise ConfigError(f"Invalid MAC address for Wake-on-LAN: {mac!r}") from exc
+
+    magic = b"\xff" * 6 + mac_bytes * 16
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.sendto(magic, (broadcast_addr, port))
 
 
 class TvManager:
@@ -61,27 +82,291 @@ class TvManager:
         wake_timeout: float = 45.0,
         ui_lock_timeout: float = 25.0,
     ) -> None:
-        raise NotImplementedError
+        self._config = config
+        self._connect_fn = connect_fn
+        self._capture_client = capture_client
+        self._wol_fn = wol_fn
+        self._backoff_steps = backoff_steps
+        self._wake_poll_interval = wake_poll_interval
+        self._wake_timeout = wake_timeout
+        self._ui_lock_timeout = ui_lock_timeout
+
+        self.state = ConnectionState.CONNECTING
+        self._tv_state = TvState()
+        self._ui_lock = asyncio.Lock()
+        self._client_key: str | None = None
+
+        self._ssap: SsapClient | None = None
+        self._pointer: PointerClient | None = None
+        self._loop_task: asyncio.Task[None] | None = None
+        self._wake_task: asyncio.Task[TvStatus] | None = None
+        self._stopping = False
+
+        self._wake_or_reload_event = asyncio.Event()
+        self._disconnected_event = asyncio.Event()
+        self._connected_event = asyncio.Event()
+        self._wake_done_event = asyncio.Event()
+        self._disconnect_code = ErrorCode.TV_OFFLINE_STANDBY
+        self._wake_requested = False
+        self._wake_failure: TvError | None = None
 
     async def start(self) -> None:
         """Start the background connection state machine loop."""
-        raise NotImplementedError
+        if self._loop_task is None or self._loop_task.done():
+            self._stopping = False
+            self._loop_task = asyncio.create_task(self._connection_loop())
 
     async def close(self) -> None:
         """Stop the connection loop and close all underlying transports."""
-        raise NotImplementedError
+        self._stopping = True
+        self._wake_or_reload_event.set()
+        self._disconnected_event.set()
+
+        if self._wake_task is not None and not self._wake_task.done():
+            self._wake_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._wake_task
+
+        if self._loop_task is not None and not self._loop_task.done():
+            self._loop_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._loop_task
+        self._loop_task = None
+
+        await self._teardown_transports(close_capture=True)
 
     def reload_client_key(self) -> None:
         """Reload the saved client key from disk (e.g. on SIGHUP)."""
-        raise NotImplementedError
+        loaded = self._try_load_client_key()
+        if loaded is not None:
+            self._client_key = loaded
+            if self.state is ConnectionState.PAIRING_REQUIRED:
+                self._wake_or_reload_event.set()
 
     async def wake(self) -> TvStatus:
         """Send a Wake-on-LAN packet and wait for the TV to register."""
-        raise NotImplementedError
+        if self.state is ConnectionState.CONNECTED:
+            return TvStatus(status="already_connected", elapsed_ms=0)
+        if self.state is ConnectionState.PAIRING_REQUIRED:
+            raise TvError(
+                ErrorCode.PAIRING_REQUIRED,
+                "TV requires pairing before wake; run pair CLI first",
+            )
+
+        if self._wake_task is None or self._wake_task.done():
+            self._wake_task = asyncio.create_task(self._run_wake())
+        return await asyncio.shield(self._wake_task)
 
     def get_state(self) -> TvStateSnapshot:
         """Return a lock-free snapshot of the cached TV state."""
-        raise NotImplementedError
+        connected = self.state is ConnectionState.CONNECTED
+        return TvStateSnapshot(
+            connected=connected,
+            stale=not connected,
+            volume=self._tv_state.volume,
+            muted=self._tv_state.muted,
+            sound_output=self._tv_state.sound_output,
+            foreground_app=self._tv_state.foreground_app,
+            last_updated=self._tv_state.last_updated,
+        )
+
+    async def _run_wake(self) -> TvStatus:
+        mac = require_mac(self._config)
+        start = time.monotonic()
+        self._wol_fn(mac, self._config.wol_broadcast, 9)
+
+        self._wake_failure = None
+        self._connected_event.clear()
+        self._wake_done_event.clear()
+        self._wake_requested = True
+        self._wake_or_reload_event.set()
+
+        if self.state is ConnectionState.CONNECTED:
+            self._wake_requested = False
+            return TvStatus(status="already_connected", elapsed_ms=0)
+
+        wait_connected = asyncio.create_task(self._connected_event.wait())
+        wait_failed = asyncio.create_task(self._wake_done_event.wait())
+        try:
+            async with asyncio.timeout(self._wake_timeout):
+                done, pending = await asyncio.wait(
+                    {wait_connected, wait_failed},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                if wait_failed in done and self._wake_failure is not None:
+                    raise self._wake_failure
+        except TimeoutError as exc:
+            for task in (wait_connected, wait_failed):
+                if not task.done():
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+            self._wake_requested = False
+            if self.state is ConnectionState.WAKING:
+                self.state = ConnectionState.STANDBY_OFFLINE
+            raise TvError(
+                ErrorCode.WAKE_TIMEOUT,
+                f"TV did not become ready within {self._wake_timeout:.0f}s",
+            ) from exc
+
+        self._wake_requested = False
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return TvStatus(status="connected", elapsed_ms=elapsed_ms)
+
+    async def _connection_loop(self) -> None:
+        backoff_idx = 0
+        while not self._stopping:
+            if self._wake_requested:
+                self.state = ConnectionState.WAKING
+            elif self.state not in (ConnectionState.CONNECTING, ConnectionState.WAKING):
+                self.state = ConnectionState.CONNECTING
+
+            try:
+                await self._connect_and_subscribe()
+            except TvError as exc:
+                await self._teardown_transports(
+                    close_capture=exc.code is not ErrorCode.PAIRING_REQUIRED
+                )
+                if exc.code is ErrorCode.PAIRING_REQUIRED:
+                    self.state = ConnectionState.PAIRING_REQUIRED
+                    self._wake_failure = exc
+                    self._wake_done_event.set()
+                    backoff_idx = await self._wait_backoff(backoff_idx)
+                    continue
+
+                if self._wake_requested:
+                    self.state = ConnectionState.WAKING
+                    await asyncio.sleep(self._wake_poll_interval)
+                    continue
+
+                self.state = ConnectionState.STANDBY_OFFLINE
+                backoff_idx = await self._wait_backoff(backoff_idx)
+                continue
+
+            backoff_idx = 0
+            self.state = ConnectionState.CONNECTED
+            self._disconnected_event.clear()
+            self._connected_event.set()
+
+            await self._disconnected_event.wait()
+            if self._stopping:
+                break
+
+            is_pairing = self._disconnect_code is ErrorCode.PAIRING_REQUIRED
+            await self._teardown_transports(close_capture=not is_pairing)
+            self.state = (
+                ConnectionState.PAIRING_REQUIRED if is_pairing else ConnectionState.STANDBY_OFFLINE
+            )
+            backoff_idx = await self._wait_backoff(backoff_idx)
+
+    async def _wait_backoff(self, backoff_idx: int) -> int:
+        if self._stopping:
+            return backoff_idx
+        delay = self._backoff_steps[min(backoff_idx, len(self._backoff_steps) - 1)]
+        next_idx = min(backoff_idx + 1, len(self._backoff_steps) - 1)
+        self._wake_or_reload_event.clear()
+        if self._wake_requested:
+            return 0
+        try:
+            await asyncio.wait_for(self._wake_or_reload_event.wait(), timeout=delay)
+        except TimeoutError:
+            pass
+
+        if self.state is ConnectionState.PAIRING_REQUIRED and not self._wake_requested:
+            reloaded = self._try_load_client_key()
+            if reloaded is not None:
+                self._client_key = reloaded
+            else:
+                return await self._wait_backoff(next_idx)
+        return next_idx
+
+    async def _connect_and_subscribe(self) -> None:
+        if self._client_key is None:
+            self._client_key = self._try_load_client_key()
+
+        ssap = SsapClient(
+            f"wss://{self._config.tv_ip}:3001",
+            connect_fn=self._connect_fn,
+            on_disconnect=self._on_ssap_disconnect,
+        )
+        self._ssap = ssap
+        resolved_key = await ssap.connect_and_register(self._client_key)
+        if resolved_key:
+            self._client_key = resolved_key
+
+        await ssap.subscribe("ssap://audio/getStatus", self._handle_audio_status)
+        await ssap.subscribe(
+            "ssap://com.webos.applicationManager/getForegroundAppInfo",
+            self._handle_foreground_app,
+        )
+        self._pointer = PointerClient(ssap.request, connect_fn=self._connect_fn)
+
+    async def _teardown_transports(self, *, close_capture: bool) -> None:
+        pointer = self._pointer
+        self._pointer = None
+        if pointer is not None:
+            await pointer.close()
+
+        ssap = self._ssap
+        self._ssap = None
+        if ssap is not None:
+            await ssap.close()
+
+        if close_capture and self._capture_client is not None:
+            with suppress(Exception):
+                await self._capture_client.close()
+
+    def _on_ssap_disconnect(self, code: ErrorCode) -> None:
+        self._disconnect_code = code
+        self._disconnected_event.set()
+
+    def _try_load_client_key(self) -> str | None:
+        key_path = self._config.client_key_path
+        if not key_path.is_file():
+            return None
+        try:
+            raw: Any = json.loads(key_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Failed to read client key file %s: %s", key_path, exc)
+            return None
+        if not isinstance(raw, dict):
+            logger.warning("Client key file %s does not contain a JSON object", key_path)
+            return None
+        mapping = cast(dict[str, Any], raw)
+        val = mapping.get(self._config.tv_ip)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+        return None
+
+    def _handle_audio_status(self, payload: dict[str, Any]) -> None:
+        volume = payload.get("volume")
+        if isinstance(volume, int) and not isinstance(volume, bool):
+            self._tv_state.volume = volume
+
+        mute = payload.get("mute")
+        if isinstance(mute, bool):
+            self._tv_state.muted = mute
+
+        volume_status = payload.get("volumeStatus")
+        if isinstance(volume_status, dict):
+            vs_dict = cast(dict[str, Any], volume_status)
+            sound_output = vs_dict.get("soundOutput")
+            if isinstance(sound_output, str):
+                self._tv_state.sound_output = sound_output
+        elif isinstance(payload.get("soundOutput"), str):
+            self._tv_state.sound_output = str(payload["soundOutput"])
+
+        self._tv_state.last_updated = time.time()
+
+    def _handle_foreground_app(self, payload: dict[str, Any]) -> None:
+        app_id = payload.get("appId")
+        if isinstance(app_id, str):
+            self._tv_state.foreground_app = app_id
+        self._tv_state.last_updated = time.time()
 
     async def send_keys(
         self,
