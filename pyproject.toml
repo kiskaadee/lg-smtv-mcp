@@ -1,3 +1,29 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lg-smtv-mcp"
+version = "0.1.0"
+description = "MCP server for controlling an LG webOS Smart TV over the local network"
+requires-python = ">=3.11"
+dependencies = [
+    "websockets",
+    "mcp",
+    "asyncssh",
+    "uvicorn",
+]
+
+[project.scripts]
+lg-smtv-mcp = "lg_smtv_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py314"
@@ -6,5 +32,6 @@ target-version = "py314"
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.pyright]
+include = ["src", "tests"]
 typeCheckingMode = "standard"
 pythonVersion = "3.14"
