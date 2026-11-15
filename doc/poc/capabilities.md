@@ -38,6 +38,7 @@ Empirical notes from probing `192.168.1.11` (`Ethernet`, MAC `7c:64:6c:94:d1:24`
 - **Power lifecycle (`turnOff` + Wake-on-LAN)**:
   - `ssap://system/turnOff` cleanly powers the TV into standby (`returnValue: true`).
   - Sending a standard WoL magic packet (`0xff * 6 + mac * 16`) over UDP broadcast (`255.255.255.255:9`) to Ethernet MAC `7c:64:6c:94:d1:24` successfully wakes and powers on the TV from standby.
+  - While the TV is in standby/booting, `wss://192.168.1.11:3001` accepts the WebSocket upgrade and immediately closes with `1008 (policy violation) Try Again Later (EWS)`—providing an instant fail-fast / boot-polling signal without waiting for a TCP timeout.
 
 ### Blocked on Retail Firmware
 
