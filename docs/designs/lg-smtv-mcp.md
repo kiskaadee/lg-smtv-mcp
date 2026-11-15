@@ -24,7 +24,7 @@ Controlling an LG webOS TV from an AI agent or automation host using one-shot CL
 
 *   Run a 24/7 `streamable-http` MCP daemon bound to a configurable `HOST` address (defaulting to `127.0.0.1` locally, or the homelab LAN interface when deployed) with constant-time `Authorization: Bearer <token>` authentication, plus `stdio` transport for local test harnesses.
 *   Maintain persistent SSAP (`wss://:3001`), pointer input socket, `subscribe` state cache, and optional `asyncssh`/SFTP (`:9922`) connections inside a unified `tv_core` package.
-*   Serialize stateful UI and capture operations (`keys`, `type_text`, `screenshot`) via an `asyncio.Lock` (10s acquire timeout) while keeping read-only state queries lock-free.
+*   Serialize stateful UI and capture operations (`keys`, `type_text`, `screenshot`) with bounded contention while keeping read-only state queries non-blocking.
 *   Fail fast on WebSocket close code `1008` (`TV_OFFLINE_STANDBY`) for mutating tools, return `connected: false, stale: true` with `last_known` values for read-only queries, and provide an explicit `tv_wake` tool using configurable Wake-on-LAN broadcast.
 *   Expose decision-model-friendly composite tools (`keys` with delays and optional inline `ImageContent`, `type_text`, `launch` with deep-link helpers, `screenshot` with `frame_sha256` and `changed_since_last`, `set_volume` with configurable `max_volume=40` cap, explicit `turn_off` / `switch_input`, and opt-in `ENABLE_RAW_SSAP=true`).
 *   Provide a one-time CLI `pair` command for interactive on-screen `PROMPT` registration and `client-key` persistence.
@@ -54,7 +54,7 @@ None. All architectural questions from the initial RFC have been resolved.
 
 *   **Given**: The TV is online and Developer Mode SSH (`:9922`) is active.
 *   **When**: A host decision loop calls `keys(["LEFT", "UP", "ENTER"], delay_ms=250, settle_ms=1000, capture=True)`.
-*   **Then**: `tv_core` acquires the UI `asyncio.Lock`, sends the three button frames over the persistent pointer socket, waits `settle_ms`, triggers `executeOneShot` to `/tmp/lg_smtv_cap_<seq>.jpg`, reads the bytes over the persistent `asyncssh` SFTP session, removes the remote file in `finally:`, and returns `keys_sent: true`, inline `ImageContent`, `frame_sha256`, and `changed_since_last`.
+*   **Then**: `tv_core` serializes the operation, sends the three button frames over the persistent pointer socket, waits `settle_ms`, captures and cleans up the remote screenshot into memory, and returns `keys_sent: true`, inline `ImageContent`, `frame_sha256`, and `changed_since_last`.
 
 ### CUJ 3: Graceful Degradation When Developer Mode SSH Expires
 
@@ -78,15 +78,14 @@ All runtime code lives under `src/lg_smtv_mcp/`, separating the transport/protoc
 | :--- | :--- |
 | `src/lg_smtv_mcp/config.py` *(planned)* | Typed `TvConfig` loaded from env vars / `.env` (`TV_IP`, `TV_MAC`, `WOL_BROADCAST`, `CLIENT_KEY_PATH`, `SSH_KEY_PATH`, `WEBOS_SSH_PASSPHRASE`, `HOST`, `PORT`, `MCP_BEARER_TOKEN`, `MAX_VOLUME`, `ENABLE_RAW_SSAP`). |
 | `src/lg_smtv_mcp/errors.py` *(planned)* | Typed domain exceptions and error codes (`TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `SCREENSHOT_UNAVAILABLE`, `LOCK_TIMEOUT`, `INVALID_ARGUMENT`). |
-| `src/lg_smtv_mcp/tv_core/protocols.py` *(planned)* | Thin Python `Protocol` interfaces (`SsapTransport`, `PointerTransport`, `CaptureTransport`, `WolSender`, `SsdpListener`) enabling offline contract tests. |
+| `src/lg_smtv_mcp/tv_core/protocols.py` *(planned)* | Thin Python `Protocol` interfaces (`WebSocketTransport`, `CaptureTransport`) enabling offline contract tests. |
 | `src/lg_smtv_mcp/tv_core/ssap.py` *(planned)* | `SsapClient`: single background reader task routing frames by `msg["id"]` to `asyncio.Future`s and `subscribe` callbacks; `PERMISSIONS` constant; `register` + `1008` detection. |
 | `src/lg_smtv_mcp/tv_core/pointer.py` *(planned)* | `PointerClient`: acquires `getPointerInputSocket`, sends plain-text `type:button` frames, and transparently re-acquires the socket if dropped. |
-| `src/lg_smtv_mcp/tv_core/capture.py` *(planned)* | `CaptureClient`: persistent `asyncssh` SFTP session (`config=[]`, `ssh-rsa` host/signature algs, passwordless key or `WEBOS_SSH_PASSPHRASE`), `/tmp/lg_smtv_cap_<seq>.jpg` pull into memory, `finally: sftp.remove()`, and `frame_sha256` / `changed_since_last` tracking. |
-| `src/lg_smtv_mcp/tv_core/wol.py` *(planned)* | `send_wol` UDP magic packet (`WOL_BROADCAST`, port `9`) and passive `ssdp:alive` multicast listener (`239.255.255.250:1900`). |
-| `src/lg_smtv_mcp/tv_core/manager.py` *(planned)* | `TvManager`: single-owner connection state machine, `subscribe` state cache (`audio/getStatus`, `getForegroundAppInfo`), asymmetric reconnect loop, and `asyncio.Lock` (10s timeout) serializing UI/capture operations. |
-| `src/lg_smtv_mcp/auth.py` *(planned)* | Starlette/ASGI Bearer token middleware (`hmac.compare_digest` on `Authorization: Bearer <token>`) and MCP `TransportSecuritySettings`. |
+| `src/lg_smtv_mcp/tv_core/capture.py` *(planned)* | `CaptureClient`: persistent `asyncssh` SFTP session (`config=[]`, `ssh-rsa` host/signature algs, passwordless key or `WEBOS_SSH_PASSPHRASE`), `/tmp/lg_smtv_cap_<seq>.jpg` pull into memory with `3–4s` SSH/SFTP timeouts, `finally: sftp.remove()`, and `frame_sha256` / `changed_since_last` tracking. |
+| `src/lg_smtv_mcp/tv_core/manager.py` *(planned)* | `TvManager`: single-owner connection state machine, `send_wol` UDP magic packet helper (`WOL_BROADCAST`, port `9`), `subscribe` state cache (`audio/getStatus`, `getForegroundAppInfo`), asymmetric reconnect loop, `CaptureClient` teardown on `STANDBY_OFFLINE`, `.client_key.json` reload on `PAIRING_REQUIRED` backoff/`SIGHUP`, and `asyncio.Lock` (10s timeout) serializing UI/capture operations. |
+| `src/lg_smtv_mcp/auth.py` *(planned)* | Minimal ASGI Bearer token middleware (`hmac.compare_digest` on `Authorization: Bearer <token>`) wrapping FastMCP's `streamable_http_app()` and `TransportSecuritySettings`. |
 | `src/lg_smtv_mcp/server.py` *(planned)* | FastMCP tool definitions, `ImageContent` formatting, partial-success shaping, `max_volume` enforcement, and `ENABLE_RAW_SSAP` gating. |
-| `src/lg_smtv_mcp/cli.py` *(planned)* | CLI entrypoint supporting `serve` (`streamable-http` or `stdio`) and one-time interactive `pair`. |
+| `src/lg_smtv_mcp/cli.py` *(planned)* | CLI entrypoint supporting `serve` (FastMCP `streamable-http` or `stdio`) and one-time interactive `pair` (atomic `os.replace` write to `.client_key.json`). |
 
 ```mermaid
 classDiagram
@@ -96,7 +95,7 @@ classDiagram
         +wake() TvStatus
         +get_state() TvStateSnapshot
         +send_keys(keys, delay_ms, settle_ms, capture) KeysResult
-        +type_text(text, send_enter, press_enter_first, capture) TextResult
+        +type_text(text, send_enter, capture) TextResult
         +screenshot() CaptureResult
         +launch_app(app_id, content_target, params) dict
         +set_volume(level) dict
@@ -119,7 +118,7 @@ classDiagram
         +capture_frame(ssap_request_fn) CaptureResult
         +close() void
     }
-    class SsapTransport {
+    class WebSocketTransport {
         <<interface>>
     }
     class CaptureTransport {
@@ -128,7 +127,8 @@ classDiagram
     TvManager --> SsapClient
     TvManager --> PointerClient
     TvManager --> CaptureClient
-    SsapClient --> SsapTransport
+    SsapClient --> WebSocketTransport
+    PointerClient --> WebSocketTransport
     CaptureClient --> CaptureTransport
 ```
 
@@ -142,16 +142,16 @@ stateDiagram-v2
     CONNECTING --> PAIRING_REQUIRED: register returns PROMPT
     CONNECTED --> STANDBY_OFFLINE: Socket closed / 1008
     STANDBY_OFFLINE --> WAKING: Explicit tv_wake tool called
-    STANDBY_OFFLINE --> CONNECTING: Asymmetric backoff or ssdp:alive
+    STANDBY_OFFLINE --> CONNECTING: Asymmetric backoff
     WAKING --> CONNECTED: Poll succeeds and register active
     WAKING --> STANDBY_OFFLINE: Wake poll timeout
-    PAIRING_REQUIRED --> CONNECTING: Operator restarts after CLI pair
+    PAIRING_REQUIRED --> CONNECTING: Backoff tick or SIGHUP reloads key file
 ```
 
 *   **SSAP `msg["id"]` Multiplexer:** `SsapClient` runs one background reader task that owns `ws.recv()`. Responses to one-shot `request()` calls resolve matching `asyncio.Future`s by `msg["id"]`; subscription `response` updates (`audio/getStatus`, `getForegroundAppInfo`) update the in-memory `TvStateSnapshot` in `TvManager`.
-*   **Standby & Fail-Fast:** WebSocket close code `1008` (`Try Again Later (EWS)`) or a ~1.5–2s connect timeout transitions `TvManager` to `STANDBY_OFFLINE`. Mutating tools fail fast with `TV_OFFLINE_STANDBY` without triggering WoL. Read-only queries (`get_state`) bypass `ui_lock` and return `connected: false, stale: true` with `last_known` values.
-*   **Reconnect & Wake:** In `STANDBY_OFFLINE`, a single background task retries with asymmetric backoff (`2s -> 5s -> 15s -> 30s`) and wakes early on passive `ssdp:alive` multicast packets from `<TV_IP>`. Calling `tv_wake` sends the WoL magic packet and switches to ~1s polling until `1008` clears and `register` + `subscribe` complete.
-*   **UI/Capture Serialization:** `send_keys`, `type_text`, and `screenshot` acquire `ui_lock` (`asyncio.Lock`) with a 10s timeout (`LOCK_TIMEOUT` if exceeded) so concurrent callers cannot interleave pointer frames or contend for SFTP capture.
+*   **Standby & Fail-Fast:** WebSocket close code `1008` (`Try Again Later (EWS)`) or a ~1.5–2s connect timeout transitions `TvManager` to `STANDBY_OFFLINE` and tears down any open `CaptureClient` SSH/SFTP session (which reconnects lazily on the next capture) so no half-open `:9922` socket lingers across standby. Mutating tools fail fast with `TV_OFFLINE_STANDBY` without triggering WoL. Read-only queries (`get_state`) bypass `ui_lock` and return `connected: false, stale: true` with `last_known` values.
+*   **Reconnect, Wake & Key Reload:** In `STANDBY_OFFLINE`, a single background task retries with asymmetric backoff (`2s -> 5s -> 15s -> 30s`) to detect manual power-ons within seconds. Calling `tv_wake` sends the WoL magic packet and switches to ~1s polling until `1008` clears and `register` + `subscribe` complete. In `PAIRING_REQUIRED`, `TvManager` re-checks `CLIENT_KEY_PATH` (`{ip: client_key}` JSON, written atomically via `os.replace` by `cli.py pair`) on its backoff tick or `SIGHUP` so pairing requires no manual daemon restart.
+*   **UI/Capture Serialization & Timeout Budget:** `send_keys`, `type_text`, and `screenshot` acquire `ui_lock` (`asyncio.Lock`) with a 10s timeout (`LOCK_TIMEOUT` if exceeded) so concurrent callers cannot interleave pointer frames or contend for SFTP capture. `CaptureClient` bounds SSH connect, `executeOneShot`, and SFTP read/`remove` operations to `3–4s` each—strictly below the `10s` `ui_lock` budget—so a stalled `:9922` socket cannot starve subsequent SSAP or pointer calls.
 
 ### 3. MCP Tool Surface
 
@@ -162,16 +162,16 @@ All tools return structured JSON payloads (plus inline MCP `ImageContent` when `
 | `tv_wake` | *(none)* | Sends WoL to `<TV_MAC>` via `WOL_BROADCAST`; polls until `CONNECTED`; returns `{status, elapsed_ms}`. | `WAKE_TIMEOUT` |
 | `get_state` | *(none)* | Lock-free read of `subscribe` cache (`connected`, `stale`, `volume`, `muted`, `sound_output`, `foreground_app`, `last_updated`). | *(never fails on standby)* |
 | `keys` | `keys: list[str]`, `delay_ms: int = 250`, `settle_ms: int = 800`, `capture: bool = False` | Acquires `ui_lock`; sends pointer buttons; if `capture=True`, captures frame. On SSH failure after keys succeed, returns `{keys_sent: true, count, capture_error}` (partial success). | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `LOCK_TIMEOUT` |
-| `type_text` | `text: str`, `send_enter: bool = True`, `press_enter_first: bool = False`, `capture: bool = False` | Acquires `ui_lock`; optionally sends `ENTER` to open native keyboard, calls `ime/insertText` + `sendEnterKey`, optionally captures. | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `LOCK_TIMEOUT` |
-| `screenshot` | *(none)* | Acquires `ui_lock`; runs `executeOneShot` to `/tmp/lg_smtv_cap_<seq>.jpg`; reads via `asyncssh` SFTP; removes remote file in `finally:`; returns `ImageContent` + `{frame_sha256, changed_since_last, size_bytes}`. | `TV_OFFLINE_STANDBY`, `SCREENSHOT_UNAVAILABLE`, `LOCK_TIMEOUT` |
+| `type_text` | `text: str`, `send_enter: bool = True`, `capture: bool = False` | Acquires `ui_lock`; calls `ime/insertText` + optional `sendEnterKey` (requires native on-screen keyboard to be open), optionally captures. | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `LOCK_TIMEOUT` |
+| `screenshot` | *(none)* | Acquires `ui_lock`; runs `executeOneShot` to `/tmp/lg_smtv_cap_<seq>.jpg`; reads via `asyncssh` SFTP; removes remote file in `finally:`; returns `ImageContent` + `{frame_sha256, changed_since_last, size_bytes}`. | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `SCREENSHOT_UNAVAILABLE`, `LOCK_TIMEOUT` |
 | `launch` | `app_id: str`, `content_target: str \| None = None`, `params: dict \| None = None` | Launches app via `system.launcher/launch` (merges `content_target` into `params` for YouTube/Netflix deep-links). | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED` |
-| `list_apps` | *(none)* | Calls `com.webos.applicationManager/listLaunchPoints`; returns compact `[{id, title}]`. | `TV_OFFLINE_STANDBY` |
-| `set_volume` | `level: int` | Rejects with `INVALID_ARGUMENT` if `level < 0` or `level > MAX_VOLUME` (default `40`); otherwise calls `audio/setVolume`. | `TV_OFFLINE_STANDBY`, `INVALID_ARGUMENT` |
-| `set_mute` | `muted: bool` | Calls `audio/setMute`. | `TV_OFFLINE_STANDBY` |
-| `list_inputs` | *(none)* | Calls `tv/getExternalInputList`; returns `[{id, label, connected}]`. | `TV_OFFLINE_STANDBY` |
-| `switch_input` | `input_id: str` | Explicit input switch via `tv/switchInput`. | `TV_OFFLINE_STANDBY` |
-| `turn_off` | *(none)* | Explicit power off via `system/turnOff`. | `TV_OFFLINE_STANDBY` |
-| `raw_ssap` | `uri: str`, `payload: dict \| None = None` | Registered **only** when `ENABLE_RAW_SSAP=true`; forwards single SSAP request. | `TV_OFFLINE_STANDBY` |
+| `list_apps` | *(none)* | Calls `com.webos.applicationManager/listLaunchPoints`; returns compact `[{id, title}]`. | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED` |
+| `set_volume` | `level: int` | Rejects with `INVALID_ARGUMENT` if `level < 0` or `level > MAX_VOLUME` (default `40`); otherwise calls `audio/setVolume`. | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `INVALID_ARGUMENT` |
+| `set_mute` | `muted: bool` | Calls `audio/setMute`. | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED` |
+| `list_inputs` | *(none)* | Calls `tv/getExternalInputList`; returns `[{id, label, connected}]`. | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED` |
+| `switch_input` | `input_id: str` | Explicit input switch via `tv/switchInput`. | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED` |
+| `turn_off` | *(none)* | Explicit power off via `system/turnOff`. | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED` |
+| `raw_ssap` | `uri: str`, `payload: dict \| None = None` | Registered **only** when `ENABLE_RAW_SSAP=true`; forwards single SSAP request. | `TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED` |
 
 ### 4. Runtime Configuration, Security & Daemon Deployment
 
@@ -181,8 +181,8 @@ All tools return structured JSON payloads (plus inline MCP `ImageContent` when `
 
 ### 5. Offline Testing & Nix Environment
 
-*   **Offline Contract Tests:** Tests inject fake `SsapTransport`, `PointerTransport`, `CaptureTransport`, and `WolSender` implementations into `TvManager` to deterministically test: `1008` fail-fast vs. `tv_wake` recovery, `msg["id"]` interleaving between `request()` and `subscribe`, pointer socket drop + auto-reacquire, `ui_lock` contention timeout, `keys(..., capture=True)` partial success when SSH fails, `finally: sftp.remove()` cleanup on failure, `frame_sha256` / `changed_since_last`, `MAX_VOLUME` guardrail, `ENABLE_RAW_SSAP` gating, and Bearer auth rejection.
-*   **`flake.nix` Updates:** Expand `pythonEnv` to include `mcp`, `asyncssh`, `uvicorn`, `starlette`, `pytest`, and `pytest-asyncio` alongside `websockets`, `pyright`, and `ruff`.
+*   **Offline Contract Tests:** Tests inject fake `WebSocketTransport` and `CaptureTransport` implementations (plus a fake `send_wol` callback) into `TvManager` to deterministically test: `1008` fail-fast vs. `tv_wake` recovery, `CaptureClient` teardown on `STANDBY_OFFLINE`, `msg["id"]` interleaving between `request()` and `subscribe`, pointer socket drop + auto-reacquire, `ui_lock` contention timeout, SSH/SFTP `3–4s` timeout isolation, `keys(..., capture=True)` partial success when SSH fails, `finally: sftp.remove()` cleanup on failure, `frame_sha256` / `changed_since_last`, `PAIRING_REQUIRED` key reload on backoff/`SIGHUP`, `MAX_VOLUME` guardrail, `ENABLE_RAW_SSAP` gating, and Bearer auth rejection.
+*   **`flake.nix` Updates:** Expand `pythonEnv` to include `mcp`, `asyncssh`, `pytest`, and `pytest-asyncio` alongside `websockets`, `pyright`, and `ruff`.
 
 ## Alternatives Considered
 
@@ -256,7 +256,7 @@ All tools return structured JSON payloads (plus inline MCP `ImageContent` when `
 #### 6. `src/lg_smtv_mcp/tv_core/protocols.py` (Create)
 
 *   **Type / Scope:** Transport abstraction boundaries (`Protocol`s).
-*   **Proposed Changes:** Define `SsapTransport`, `PointerTransport`, `CaptureTransport`, `WolSender`, and `SsdpListener` `Protocol` interfaces so `tv_core` depends on abstractions and `pytest` injects deterministic fakes offline.
+*   **Proposed Changes:** Define `WebSocketTransport` (shared by `SsapClient` and `PointerClient`) and `CaptureTransport` `Protocol` interfaces so `tv_core` depends on abstractions and `pytest` injects deterministic fakes offline.
 
 #### 7. `src/lg_smtv_mcp/tv_core/ssap.py` (Create)
 
@@ -271,39 +271,34 @@ All tools return structured JSON payloads (plus inline MCP `ImageContent` when `
 #### 9. `src/lg_smtv_mcp/tv_core/capture.py` (Create)
 
 *   **Type / Scope:** Developer Mode `asyncssh`/SFTP screenshot client.
-*   **Proposed Changes:** Implement `CaptureClient` holding a persistent `asyncssh` SFTP connection (`config=[]`, `server_host_key_algs=["ssh-rsa", ...]`, `signature_algs=["ssh-rsa", ...]`, optional `WEBOS_SSH_PASSPHRASE`). On capture: allocate `/tmp/lg_smtv_cap_<seq>.jpg`, call `executeOneShot`, pull into memory only if `returnValue: true`, `await sftp.remove(remote_path)` in `finally:`, compute `frame_sha256` and `changed_since_last`, and raise `SCREENSHOT_UNAVAILABLE` if SSH is disabled/expired.
+*   **Proposed Changes:** Implement `CaptureClient` holding a persistent `asyncssh` SFTP connection (`config=[]`, `server_host_key_algs=["ssh-rsa", ...]`, `signature_algs=["ssh-rsa", ...]`, optional `WEBOS_SSH_PASSPHRASE`) with `3–4s` timeouts on SSH connect, `executeOneShot`, and SFTP read/`remove` (strictly below the `10s` `ui_lock` budget). On capture: allocate `/tmp/lg_smtv_cap_<seq>.jpg`, call `executeOneShot`, pull into memory only if `returnValue: true`, `await sftp.remove(remote_path)` in `finally:`, compute `frame_sha256` and `changed_since_last`, and raise `SCREENSHOT_UNAVAILABLE` if SSH is disabled/expired.
 
-#### 10. `src/lg_smtv_mcp/tv_core/wol.py` (Create)
+#### 10. `src/lg_smtv_mcp/tv_core/manager.py` and `src/lg_smtv_mcp/tv_core/__init__.py` (Create)
 
-*   **Type / Scope:** Wake-on-LAN and passive SSDP listener.
-*   **Proposed Changes:** Implement `send_wol(mac, broadcast_addr, port=9)` UDP magic packet sender and `SsdpAliveListener` listening for `ssdp:alive` from `TV_IP` on `239.255.255.250:1900` to wake the reconnect loop when the TV boots via physical remote.
+*   **Type / Scope:** Single-owner connection state machine, `subscribe` cache, and WoL helper.
+*   **Proposed Changes:** Implement `send_wol(mac, broadcast_addr, port=9)` UDP magic packet helper and `TvManager` managing `ConnectionState` (`CONNECTING`, `CONNECTED`, `STANDBY_OFFLINE`, `WAKING`, `PAIRING_REQUIRED`), `subscribe` cache (`audio/getStatus`, `getForegroundAppInfo`), asymmetric reconnect backoff (`2s -> 5s -> 15s -> 30s`), `CaptureClient` teardown on `STANDBY_OFFLINE`, `CLIENT_KEY_PATH` (`{ip: client_key}`) reload on `PAIRING_REQUIRED` backoff ticks or `SIGHUP`, `ui_lock` (`asyncio.Lock` with 10s acquire timeout), lock-free `get_state()` returning `connected: false, stale: true` + `last_known` when offline, and partial-success handling on `send_keys(..., capture=True)`.
 
-#### 11. `src/lg_smtv_mcp/tv_core/manager.py` and `src/lg_smtv_mcp/tv_core/__init__.py` (Create)
+#### 11. `src/lg_smtv_mcp/auth.py` (Create)
 
-*   **Type / Scope:** Single-owner connection state machine and `subscribe` cache.
-*   **Proposed Changes:** Implement `TvManager` managing `ConnectionState` (`CONNECTING`, `CONNECTED`, `STANDBY_OFFLINE`, `WAKING`, `PAIRING_REQUIRED`), `subscribe` cache (`audio/getStatus`, `getForegroundAppInfo`), asymmetric reconnect backoff (`2s -> 5s -> 15s -> 30s`), `ui_lock` (`asyncio.Lock` with 10s acquire timeout), lock-free `get_state()` returning `connected: false, stale: true` + `last_known` when offline, and partial-success handling on `send_keys(..., capture=True)`.
+*   **Type / Scope:** Minimal HTTP Bearer token middleware and transport security.
+*   **Proposed Changes:** Implement a minimal ASGI middleware verifying `Authorization: Bearer <token>` via `hmac.compare_digest` (returning `401` on missing/invalid token) around FastMCP's built-in `streamable_http_app()` and configure MCP `TransportSecuritySettings`.
 
-#### 12. `src/lg_smtv_mcp/auth.py` (Create)
-
-*   **Type / Scope:** HTTP Bearer token middleware and transport security.
-*   **Proposed Changes:** Implement Starlette/ASGI middleware verifying `Authorization: Bearer <token>` via `hmac.compare_digest` (returning `401` on missing/invalid token) and configure MCP `TransportSecuritySettings`.
-
-#### 13. `src/lg_smtv_mcp/server.py` (Create)
+#### 12. `src/lg_smtv_mcp/server.py` (Create)
 
 *   **Type / Scope:** FastMCP server and tool definitions.
 *   **Proposed Changes:** Register all 12 default tools (`tv_wake`, `get_state`, `keys`, `type_text`, `screenshot`, `launch`, `list_apps`, `set_volume`, `set_mute`, `list_inputs`, `switch_input`, `turn_off`) and conditionally register `raw_ssap` only when `ENABLE_RAW_SSAP=true`. Document the `type_text` native-keyboard requirement in its tool description, enforce `0 <= level <= MAX_VOLUME`, and format inline `ImageContent` + metadata.
 
-#### 14. `src/lg_smtv_mcp/cli.py` (Create)
+#### 13. `src/lg_smtv_mcp/cli.py` (Create)
 
 *   **Type / Scope:** CLI entrypoint (`serve`, `pair`).
-*   **Proposed Changes:** Implement `serve --transport [streamable-http|stdio]` (running `uvicorn` with `auth.py` middleware for `streamable-http`, or FastMCP `stdio`) and `pair --ip <TV_IP>` for one-time interactive `PROMPT` pairing and `.client_key.json` persistence.
+*   **Proposed Changes:** Implement `serve --transport [streamable-http|stdio]` (delegating to FastMCP's built-in `streamable-http` app wrapped with `auth.py`, or `FastMCP.run(transport="stdio")`) and `pair --ip <TV_IP>` for one-time interactive `PROMPT` pairing with atomic `os.replace` persistence to `.client_key.json` (`{ip: client_key}`).
 
-#### 15. `tests/` (`conftest.py`, `test_ssap.py`, `test_manager.py`, `test_capture.py`, `test_server_auth.py`) (Create)
+#### 14. `tests/` (`conftest.py`, `test_ssap.py`, `test_manager.py`, `test_capture.py`, `test_server_auth.py`) (Create)
 
 *   **Type / Scope:** Offline `pytest` unit and contract test suite.
-*   **Proposed Changes:** Provide `Protocol` fakes and verify: `msg["id"]` multiplexing with interleaved `subscribe` updates; `1008` fail-fast vs. `tv_wake` recovery; offline `get_state` (`connected: false, stale: true`); `ui_lock` 10s timeout; pointer auto-reacquire; `keys(..., capture=True)` partial success when SSH fails; `finally: sftp.remove()` cleanup; `frame_sha256` / `changed_since_last`; `set_volume` `INVALID_ARGUMENT` above `MAX_VOLUME`; `ENABLE_RAW_SSAP` gating; and Bearer auth `401`/constant-time check.
+*   **Proposed Changes:** Provide `WebSocketTransport` and `CaptureTransport` fakes (plus a `send_wol` stub) and verify: `msg["id"]` multiplexing with interleaved `subscribe` updates; `1008` fail-fast vs. `tv_wake` recovery; `CaptureClient` teardown on `STANDBY_OFFLINE`; offline `get_state` (`connected: false, stale: true`); `ui_lock` 10s timeout and `3–4s` SSH/SFTP timeout isolation; pointer auto-reacquire; `keys(..., capture=True)` partial success when SSH fails; `finally: sftp.remove()` cleanup; `frame_sha256` / `changed_since_last`; `PAIRING_REQUIRED` key reload on backoff/`SIGHUP`; `set_volume` `INVALID_ARGUMENT` above `MAX_VOLUME`; `ENABLE_RAW_SSAP` gating; and Bearer auth `401`/constant-time check.
 
-#### 16. `deploy/lg-smtv-mcp.service` and `README.md` (Create / Modify)
+#### 15. `deploy/lg-smtv-mcp.service` and `README.md` (Create / Modify)
 
 *   **Type / Scope:** Deployment template and repository documentation.
 *   **Proposed Changes:** Add a placeholder `systemd` unit file (`deploy/lg-smtv-mcp.service`) referencing `EnvironmentFile` and `nix develop --command lg-smtv-mcp serve`, and update `README.md` with setup, `pair`, `.env`, and verification instructions.
