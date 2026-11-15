@@ -7,3 +7,9 @@ __pycache__/
 .tv_state.json
 *.jpg
 .internal/
+webos_rsa
+.webos_rsa
+*.pem
+*.key
+id_rsa*
+id_ed25519*

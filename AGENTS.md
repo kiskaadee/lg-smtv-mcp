@@ -29,6 +29,11 @@ The working tree represents the user's active work.
 - **Contracts Without Code Duplication:** Avoid pasting Python class or dataclass blocks into architecture/design docs. Model relationships with a Mermaid `classDiagram` (or `erDiagram`), summarize exact signatures in a concise table, and link directly to the authoritative source file (label as *(planned)* if not yet created).
 - **Policy vs. Mechanism in Diagrams:** Keep flowcharts at the domain-policy level (e.g., *"Is the TV in standby (`1008`)?"*) rather than mirroring low-level library syntax. Capture mandatory mechanism invariants in prose or the detailed implementation manifest.
 
+### 3.2 Validation, Error Boundaries & Dependency Hygiene
+- **Boundary Validation vs. Internal State:** Any class representing external/operator input or wire schemas (e.g., `TvConfig`, MCP tool inputs) must use Pydantic v2 `BaseModel` (`ConfigDict(frozen=True, extra="forbid")`) with validators on the class itself so invalid state cannot be constructed by bypassing a factory function. Pure internal state containers (such as `TvState`) may use stdlib `@dataclass`. Never decorate `Exception` subclasses with `@dataclass`—always write an explicit `__init__` calling `super().__init__(...)` so `Exception.args` and `str(err)` remain intact.
+- **Error Domain Separation (`ConfigError` vs. `TvError`):** Raise `ConfigError` for startup, environment, and operator configuration failures (caught by the CLI entrypoint to exit cleanly; never returned as an MCP tool payload). Raise `TvError(ErrorCode, message)` exclusively for runtime TV, SSAP, pointer, WoL, or Dev Mode SSH failures during tool execution so the MCP server can surface actionable recovery hints to the calling agent.
+- **Single-Source & Explicit Dependencies:** Keep `runtimeDeps` and `testDeps` single-sourced in `flake.nix` (`pythonEnv = runtimeDeps ++ testDeps`, `packages.default.dependencies = runtimeDeps`). Never rely on implicit transitive dependencies: if any module under `src/` imports a third-party package directly, declare it explicitly in both `pyproject.toml` (`dependencies`) and `flake.nix` (`runtimeDeps`).
+
 ---
 
 ## 4. Operational & Protocol Invariants
@@ -42,9 +47,12 @@ The working tree represents the user's active work.
 
 ---
 
-## 5. Verification & Completion
+## 5. Verification, Hooks & CI Expectations
 
-Every task must be verified inside `nix develop` before declaring completion:
-1. Run linters, formatters, and type checks: `nix develop --command ruff check .` and `nix develop --command pyright`.
-2. Run test suites when tests are present: `nix develop --command pytest`.
-3. Report: (1) What changed, (2) Files modified/created, (3) Verification performed, (4) Unverified areas/risks.
+Every task and commit must pass automated verification inside `nix develop`:
+1. **Local Pre-Commit Hook (`.githooks/pre-commit`):** Configured automatically by `flake.nix` `shellHook` (`git config core.hooksPath .githooks`). Runs `ruff check .`, `ruff format --check .`, `pyright`, and `pytest` before every commit. Never bypass hooks with `--no-verify`.
+2. **TDD Red-Phase Commits (`@pytest.mark.xfail`):** When committing Red-phase tests before the feature implementation exists, provide typed symbol stubs (`raise NotImplementedError`) so `pyright` passes, and decorate unimplemented tests with `@pytest.mark.xfail(strict=True, reason="Red phase: ...")` so `pytest` and `.githooks/pre-commit` exit `0` while still failing if a Red test passes tautologically. Remove `xfail` in the Green-phase commit.
+3. **Behavior-Driven Test Naming:** Name all test functions using the consistent `test_<unit>_<behavior>` convention (e.g., `test_load_config_rejects_invalid_env_values_with_config_error` rather than broad names like `test_load_config_defaults`) so `pytest -v` output reads as a clear specification of expected behavior.
+4. **Python 3.14 & Strict Typing:** Target Python `>=3.14` (PEP 649 lazy annotations are native—never add `from __future__ import annotations`, enforced by Ruff `TID251`). All code in `src/` and `tests/` must pass `pyright` in `strict` mode without untyped parameters or implicit `Any`.
+5. **Server-Side Gitea Actions CI (`.gitea/workflows/ci.yaml`):** Runs `nix flake check` on every push and pull request targeting `main`, executing `ruff check .`, `ruff format --check .`, `pyright`, `pytestCheckHook`, and `buildPythonApplication` inside the isolated Nix sandbox. Verify `nix flake check` locally before opening or updating a pull request.
+6. **Completion Reporting:** Report: (1) What changed, (2) Files modified/created, (3) Verification performed, (4) Unverified areas/risks.
