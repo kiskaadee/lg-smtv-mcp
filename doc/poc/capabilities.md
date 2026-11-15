@@ -33,6 +33,11 @@ Empirical notes from probing `192.168.1.11` (`Ethernet`, MAC `7c:64:6c:94:d1:24`
   - `/tmp/test.jpg` is not served over `https://192.168.1.11:3001/tmp/...` (timed out).
   - **Verified workaround**: With **LG Developer Mode** + **Key Server** enabled (SSH on port `9922`, `ssh-rsa` host/pubkey algorithms enabled for the TV host), `scp webos-tv:/tmp/test.jpg .` transfers the `~10 KB` screenshot in `< 1s` (`1.1 MB/s`).
   - Dev Mode shell environment observed: `uid=6739(prisoner) gid=5000(jailer)`, home `/media/developer`, `Linux LGwebOSTV 5.4.268-294.24.papikonda.2 #1 SMP PREEMPT ... aarch64 GNU/Linux` (`1222 MB` RAM).
+- **Pointer / D-pad input socket**: `ssap://com.webos.service.networkinput/getPointerInputSocket` returns a second `wss://` `socketPath` accepting plain-text frames (`type:button\nname:HOME|ENTER|BACK|UP|DOWN|LEFT|RIGHT\n\n`). Requires `manifest.permissions` in the `register` payload even when reusing a saved `client-key`.
+- **Text input (`ime`)**: `ssap://com.webos.service.ime/insertText` (`{"text": "...", "replace": 0}`) and `ssap://com.webos.service.ime/sendEnterKey` work cleanly once the native webOS on-screen keyboard is open (calling `insertText` before opening the keyboard returns `returnValue: true` without populating the field).
+- **Power lifecycle (`turnOff` + Wake-on-LAN)**:
+  - `ssap://system/turnOff` cleanly powers the TV into standby (`returnValue: true`).
+  - Sending a standard WoL magic packet (`0xff * 6 + mac * 16`) over UDP broadcast (`255.255.255.255:9`) to Ethernet MAC `7c:64:6c:94:d1:24` successfully wakes and powers on the TV from standby.
 
 ### Blocked on Retail Firmware
 
@@ -40,7 +45,4 @@ Empirical notes from probing `192.168.1.11` (`Ethernet`, MAC `7c:64:6c:94:d1:24`
 
 ### Not Yet Tested on This Device
 
-- **Pointer / D-pad input socket**: `ssap://com.webos.service.networkinput/getPointerInputSocket` (second WebSocket using plain-text `type:button` / `type:move` / `type:click` frames).
-- **Text input**: `ssap://com.webos.service.ime/insertText` & `sendEnterKey` (works in native webOS inputs; some third-party apps use custom keyboards).
 - **Subscriptions**: `"type": "subscribe"` on `audio/getStatus` and `getForegroundAppInfo` for a persistent client.
-- **Wake-on-LAN**: Magic UDP packet to MAC `7c:64:6c:94:d1:24` to power on from standby.
