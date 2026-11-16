@@ -1,6 +1,6 @@
 # ADR-0004: Sequenced Temp Captures with Cleanup and Sweep
 
-- Status: Accepted (Implementation planned in M2 `#5`)
+- Status: Accepted (Implementation planned in M2 `#12`)
 - Date: 2026-11-15
 - Deciders: kiskaadee
 

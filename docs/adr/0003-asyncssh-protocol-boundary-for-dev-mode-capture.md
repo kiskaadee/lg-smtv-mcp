@@ -1,6 +1,6 @@
 # ADR-0003: Asyncssh Protocol Boundary for Dev Mode Capture
 
-- Status: Accepted (Protocol seams `CaptureTransport` / `FrameCapturer` implemented in M1; `CaptureClient` / `AsyncSshCaptureTransport` planned for M2 `#5`)
+- Status: Accepted (Protocol seams `CaptureTransport` / `FrameCapturer` implemented in M1; `CaptureClient` / `AsyncSshCaptureTransport` planned for M2 `#12`)
 - Date: 2026-11-15
 - Deciders: kiskaadee
 
