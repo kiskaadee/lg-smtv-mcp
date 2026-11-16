@@ -6,8 +6,8 @@ A Python Model Context Protocol (MCP) server for persistent, local-network contr
 
 The server is deliberately **LLM-free**: it exposes bounded, deterministic operations so external AI agents (such as Antigravity, Claude, or a vision-guided decision loop) can reason over UI state and control the television without embedding model APIs into the daemon.
 
-> **Status: Active development (Milestone M1).**
-> Configuration validation, error taxonomy, and the [`tv_core`](src/lg_smtv_mcp/tv_core/) engine (SSAP multiplexer, `PointerClient`, and `TvManager` state machine) are implemented and unit-tested offline. FastMCP tool bindings, Bearer authentication, CLI entrypoints (`pair` / `serve`), and end-to-end verification are currently in progress; Developer Mode SFTP screenshot capture is planned for M2.
+> **Status: Milestone M1 complete (MVP).**
+> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), and full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)) are implemented and tested. Developer Mode SFTP screenshot capture is planned for M2.
 
 ---
 
@@ -34,7 +34,7 @@ The codebase centers on [`tv_core`](src/lg_smtv_mcp/tv_core/), which owns the TV
 | [`SsapClient`](src/lg_smtv_mcp/tv_core/ssap.py) | Implemented | Persistent TLS SSAP WebSocket, `msg["id"]` request/subscribe multiplexing, `1008` standby mapping |
 | [`PointerClient`](src/lg_smtv_mcp/tv_core/pointer.py) | Implemented | Ephemeral webOS pointer socket for allowlisted remote button frames and mid-batch reconnect |
 | [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) | Implemented | Single-owner connection loop, stepped backoff, `wake()` coalescing, `subscribe` cache, `ui_lock`, control surface |
-| MCP Server & CLI (`server.py`, `cli.py`) | In progress (M1) | FastMCP tools, `streamable-http` Bearer auth, `pair` / `serve` CLI, `SIGHUP` key reload |
+| [`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py), [`cli.py`](src/lg_smtv_mcp/cli.py) | Implemented | FastMCP tools, `streamable-http` Bearer auth & host validation, `pair` / `serve` CLI, `SIGHUP` key reload |
 | Developer Mode Capture (`capture.py`) | Planned (M2) | `asyncssh` SFTP screenshot retrieval behind the [`FrameCapturer`](src/lg_smtv_mcp/tv_core/protocols.py) protocol |
 
 ### Communication Channels
@@ -60,14 +60,14 @@ Implementation is tracked on the [Project Pipeline](https://gitea.roadtotech.me/
 
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
-| **M1** | Core config, `tv_core` engine, FastMCP tools, Bearer auth, `pair`/`serve` CLI, E2E verification | In progress (`#1` & `#2` merged; `#3` in progress; `#4` queued) |
+| **M1** | Core config, `tv_core` engine, FastMCP tools, Bearer auth, `pair`/`serve` CLI, E2E verification | Complete (`#1`–`#3` merged on `main`; `#4` E2E & docs) |
 | **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, extended surface | Planned (`#5`) |
 
-Implemented in [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) today (not yet exposed over MCP until `#3` completes):
-- Persistent SSAP multiplexing and `subscribe`-backed state snapshots (`volume`, `muted`, `sound_output`, `foreground_app`)
-- Stepped reconnect backoff and explicit `wake()` coalescing (`WAKE_TIMEOUT`)
-- Allowlisted pointer button sequences (`send_keys`) and IME text entry (`type_text`)
-- App discovery/launching (`list_apps`, `launch_app`), volume/mute guardrails (`set_volume`, `set_mute`), input discovery/switching (`list_inputs`, `switch_input`), `turn_off`, and gated `raw_ssap`
+Implemented in [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) and exposed via [`server.py`](src/lg_smtv_mcp/server.py):
+- Persistent SSAP multiplexing and `subscribe`-backed state snapshots (`get_state`: `volume`, `muted`, `sound_output`, `foreground_app`)
+- Stepped reconnect backoff and explicit Wake-on-LAN coalescing (`tv_wake`, bounded by `WAKE_TIMEOUT`)
+- Allowlisted pointer button sequences (`keys`) and IME text entry (`type_text`) with optional `capture` hook (`screenshot`)
+- App discovery/launching (`list_apps`, `launch`), volume/mute guardrails (`set_volume`, `set_mute`), input discovery/switching (`list_inputs`, `switch_input`), `turn_off`, and opt-in `raw_ssap` (`ENABLE_RAW_SSAP=true`)
 
 ---
 
@@ -109,6 +109,17 @@ Runtime configuration is loaded by [`load_config()`](src/lg_smtv_mcp/config.py) 
 cp .env.example .env
 ```
 
+Edit `.env` with your TV's local network coordinates and a generated Bearer token (never commit `.env` or `.client_key.json`):
+
+```dotenv
+TV_IP=<TV_IP>
+TV_MAC=<TV_MAC>
+MCP_BEARER_TOKEN=<GENERATE_TOKEN>
+HOST=127.0.0.1
+PORT=8765
+MAX_VOLUME=40
+```
+
 | Variable | Purpose | Default / Requirement |
 | :--- | :--- | :--- |
 | `TV_IP` | Target TV IPv4 address | Required |
@@ -125,7 +136,46 @@ cp .env.example .env
 | `MAX_VOLUME` | Upper bound guardrail (`0..100`) for `set_volume` | `40` |
 | `ENABLE_RAW_SSAP` | Enables optional `raw_ssap` pass-through (`true`/`false`) | `false` |
 
-> **Note:** `TvConfig` and `load_config()` are implemented, while the MCP server runtime and `pair` / `serve` CLI are still under active development in M1.
+---
+
+## Running the MVP Server (`pair` & `serve`)
+
+1. **Pair with the TV (one-time per TV):** Ensure the TV is powered on with *LG Connect Apps* enabled, then run:
+
+   ```bash
+   lg-smtv-mcp pair
+   # Optional: override IP or also fetch Developer Mode SSH key
+   lg-smtv-mcp pair --ip <TV_IP>
+   ```
+
+   Accept the pairing prompt on the TV screen. The client key is saved atomically with `0600` permissions to `CLIENT_KEY_PATH` (default `.client_key.json`).
+
+2. **Start the MCP server:**
+
+   ```bash
+   # Default: persistent Streamable HTTP daemon at http://<HOST>:<PORT>/mcp
+   # Requires Authorization: Bearer <MCP_BEARER_TOKEN>
+   lg-smtv-mcp serve
+
+   # Local testing over stdio (no HTTP Bearer token required)
+   lg-smtv-mcp serve --transport stdio
+   ```
+
+   If you re-pair while `serve` is running, send `SIGHUP` to reload `.client_key.json` without restarting the daemon.
+
+---
+
+## Operator Live-TV E2E Smoke Test Checklist
+
+Automated tests run strictly offline. After deploying or updating on a host on the same LAN as the TV, run this manual smoke checklist from an MCP client connected to `lg-smtv-mcp serve`:
+
+- [ ] **`pair`**: Run `lg-smtv-mcp pair`, accept the on-screen TV prompt, and confirm `CLIENT_KEY_PATH` (`.client_key.json`) exists with `0600` permissions and an entry for `<TV_IP>`.
+- [ ] **`tv_wake`**: With the TV in standby, verify a mutating tool (`launch`) fails fast with `TV_OFFLINE_STANDBY` (no implicit WoL), then call `tv_wake` and confirm the TV powers on and returns `status: "connected"`.
+- [ ] **`get_state`**: Call `get_state` and confirm `connected: true`, `stale: false`, and live `volume`, `muted`, `sound_output`, and `foreground_app` values.
+- [ ] **`launch`**: Call `launch` (e.g., `app_id="youtube.leanback.v4"` with an optional `content_target`) and confirm the app opens on screen.
+- [ ] **`keys`**: Call `keys` with a small batch (e.g., `["DOWN", "ENTER"]`) and confirm D-pad navigation registers on the TV.
+- [ ] **`set_volume`**: Call `set_volume` with a safe level within `MAX_VOLUME` (e.g., `15`) and confirm the TV volume updates.
+- [ ] **`turn_off`**: Call `turn_off` and confirm the TV enters standby and subsequent `get_state` reports `connected: false, stale: true`.
 
 ---
 
