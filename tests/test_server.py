@@ -394,3 +394,66 @@ async def test_server_http_app_lifespan_starts_and_closes_manager_with_sighup(
         "lifespan.shutdown.complete",
     ]
     assert ssap_ws.closed is True
+
+
+async def test_server_http_app_allows_authenticated_mcp_initialize_request(
+    tmp_path: Path,
+) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+    ssap_ws = _online_transport(sent_requests)
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return ssap_ws
+
+    config = _make_config(tmp_path)
+    mgr = TvManager(config, connect_fn=connect_fn, backoff_steps=(10.0,))
+    app = create_http_app(config, manager=mgr)
+
+    incoming: list[MutableMapping[str, Any]] = [
+        {"type": "lifespan.startup"},
+        {"type": "lifespan.shutdown"},
+    ]
+    startup_done = asyncio.Event()
+    allow_shutdown = asyncio.Event()
+
+    async def receive() -> MutableMapping[str, Any]:
+        if incoming[0]["type"] == "lifespan.shutdown":
+            await allow_shutdown.wait()
+        return incoming.pop(0)
+
+    async def send(msg: MutableMapping[str, Any]) -> None:
+        if msg["type"] == "lifespan.startup.complete":
+            startup_done.set()
+
+    async def _run_lifespan() -> None:
+        await app({"type": "lifespan"}, receive, send)
+
+    lifespan_task: asyncio.Task[None] = asyncio.create_task(_run_lifespan())
+    try:
+        await asyncio.wait_for(startup_done.wait(), timeout=2.0)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://127.0.0.1:8765"
+        ) as client:
+            resp = await client.post(
+                "/mcp",
+                headers={
+                    "Authorization": "Bearer test-bearer-token",
+                    "Accept": "application/json, text/event-stream",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-03-26",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test-client", "version": "0.1.0"},
+                    },
+                },
+            )
+        assert resp.status_code == 200
+        assert "lg-smtv-mcp" in resp.text
+    finally:
+        allow_shutdown.set()
+        await asyncio.wait_for(lifespan_task, timeout=2.0)

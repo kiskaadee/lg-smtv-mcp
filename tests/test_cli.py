@@ -5,6 +5,7 @@ import stat
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from mcp.server.mcpserver import MCPServer
 
@@ -51,7 +52,7 @@ def test_cli_serve_http_fails_closed_when_bearer_token_missing_or_blank(
     assert called is False
 
 
-def test_cli_serve_http_runs_uvicorn_with_configured_host_and_port(tmp_path: Path) -> None:
+async def test_cli_serve_http_runs_uvicorn_with_configured_host_and_port(tmp_path: Path) -> None:
     captured: list[tuple[ASGIApp, str, int]] = []
 
     def fake_uvicorn(app: ASGIApp, host: str, port: int) -> None:
@@ -65,9 +66,14 @@ def test_cli_serve_http_runs_uvicorn_with_configured_host_and_port(tmp_path: Pat
 
     assert rc == 0
     assert len(captured) == 1
-    _, host, port = captured[0]
+    app, host, port = captured[0]
     assert host == "127.0.0.1"
     assert port == 8765
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8765") as client:
+        unauth = await client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    assert unauth.status_code == 401
 
 
 def test_cli_serve_stdio_delegates_to_stdio_runner_without_bearer_token(tmp_path: Path) -> None:
