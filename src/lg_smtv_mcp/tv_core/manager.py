@@ -473,6 +473,7 @@ class TvManager:
                 changed_since_last=cap.changed_since_last if cap is not None else None,
                 size_bytes=cap.size_bytes if cap is not None else None,
                 capture_error=cap_err,
+                image_bytes=cap.image_bytes if cap is not None else None,
             )
 
     async def type_text(
@@ -505,6 +506,7 @@ class TvManager:
                 changed_since_last=cap.changed_since_last if cap is not None else None,
                 size_bytes=cap.size_bytes if cap is not None else None,
                 capture_error=cap_err,
+                image_bytes=cap.image_bytes if cap is not None else None,
             )
 
     async def screenshot(self) -> CaptureResult:

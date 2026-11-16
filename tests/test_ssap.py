@@ -6,7 +6,7 @@ import pytest
 
 from lg_smtv_mcp.errors import ErrorCode, TvError
 from lg_smtv_mcp.tv_core.protocols import WebSocketClosedError
-from lg_smtv_mcp.tv_core.ssap import PERMISSIONS, SsapClient
+from lg_smtv_mcp.tv_core.ssap import SsapClient
 from tests.conftest import FakeWebSocketTransport
 
 
@@ -35,8 +35,25 @@ async def test_ssap_register_sends_all_permissions_even_with_saved_client_key() 
     reg_msg = json.loads(transport.sent[0])
     assert reg_msg["type"] == "register"
     assert reg_msg["payload"]["client-key"] == "saved-key-123"
-    assert len(PERMISSIONS) == 16
-    assert reg_msg["payload"]["manifest"]["permissions"] == list(PERMISSIONS)
+    expected_permissions = [
+        "LAUNCH",
+        "CONTROL_AUDIO",
+        "CONTROL_DISPLAY",
+        "CONTROL_POWER",
+        "CONTROL_INPUT_TEXT",
+        "CONTROL_INPUT_MEDIA_PLAYBACK",
+        "CONTROL_INPUT_JOYSTICK",
+        "CONTROL_INPUT_TV",
+        "CONTROL_TV_MEDIA",
+        "CONTROL_MOUSE_AND_KEYBOARD",
+        "READ_INSTALLED_APPS",
+        "READ_RUNNING_APPS",
+        "READ_INPUT_DEVICE_LIST",
+        "READ_TV_CHANNEL_LIST",
+        "READ_POWER_STATE",
+        "WRITE_NOTIFICATION_TOAST",
+    ]
+    assert reg_msg["payload"]["manifest"]["permissions"] == expected_permissions
 
 
 async def test_ssap_request_demuxes_interleaved_subscribe_push_frame() -> None:
