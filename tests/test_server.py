@@ -457,3 +457,37 @@ async def test_server_http_app_allows_authenticated_mcp_initialize_request(
     finally:
         allow_shutdown.set()
         await asyncio.wait_for(lifespan_task, timeout=2.0)
+
+
+async def test_server_create_mcp_server_wires_default_capture_client(tmp_path: Path) -> None:
+    import lg_smtv_mcp.server as server_mod
+    from lg_smtv_mcp.tv_core.capture import AsyncSshCaptureTransport, CaptureClient
+
+    config = _make_config(tmp_path)
+    captured: dict[str, Any] = {}
+    original_tv_manager = server_mod.TvManager
+
+    class DummyManager:
+        async def start(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    def fake_tv_manager(cfg: Any, **kwargs: Any) -> DummyManager:
+        captured["config"] = cfg
+        captured["kwargs"] = kwargs
+        return DummyManager()
+
+    server_mod.TvManager = fake_tv_manager  # type: ignore[assignment]
+    try:
+        server_mod.create_mcp_server(config)
+    finally:
+        server_mod.TvManager = original_tv_manager  # type: ignore[assignment]
+
+    assert captured["config"] is config
+    assert "capture_client" in captured["kwargs"]
+    capture_client = captured["kwargs"]["capture_client"]
+    assert isinstance(capture_client, CaptureClient)
+    transport = capture_client._transport  # pyright: ignore[reportPrivateUsage]
+    assert isinstance(transport, AsyncSshCaptureTransport)
