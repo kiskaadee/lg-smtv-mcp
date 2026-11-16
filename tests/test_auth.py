@@ -29,7 +29,6 @@ async def _ok_app(scope: Scope, receive: Receive, send: Send) -> None:
     await send({"type": "http.response.body", "body": b'{"ok":true}', "more_body": False})
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: auth not yet implemented")
 async def test_bearer_auth_allows_valid_token_and_forwards_to_app() -> None:
     app = wrap_bearer_auth(_ok_app, "secret-token-123")
     transport = httpx.ASGITransport(app=app)
@@ -40,7 +39,6 @@ async def test_bearer_auth_allows_valid_token_and_forwards_to_app() -> None:
     assert resp.json() == {"ok": True}
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: auth not yet implemented")
 @pytest.mark.parametrize(
     "headers",
     [
@@ -66,7 +64,6 @@ async def test_bearer_auth_rejects_missing_malformed_or_invalid_token_with_401(
     assert resp.json() == {"error": "unauthorized"}
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: auth not yet implemented")
 async def test_bearer_auth_passes_through_non_http_lifespan_scope() -> None:
     seen_scopes: list[str] = []
 
@@ -86,14 +83,12 @@ async def test_bearer_auth_passes_through_non_http_lifespan_scope() -> None:
     assert seen_scopes == ["lifespan"]
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: auth not yet implemented")
 @pytest.mark.parametrize("bad_token", ["", "   "])
 def test_bearer_auth_rejects_blank_server_token_with_config_error(bad_token: str) -> None:
     with pytest.raises(ConfigError):
         wrap_bearer_auth(_ok_app, bad_token)
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: auth not yet implemented")
 def test_transport_security_settings_includes_local_bound_host_and_allowed_hosts() -> None:
     config = TvConfig(
         tv_ip="192.0.2.10",
@@ -114,7 +109,6 @@ def test_transport_security_settings_includes_local_bound_host_and_allowed_hosts
     assert "http://tv-mcp.local:9000" in settings.allowed_origins
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: auth not yet implemented")
 def test_transport_security_settings_excludes_wildcard_bind_host_from_allowed_hosts() -> None:
     config = TvConfig(tv_ip="192.0.2.10", host="0.0.0.0", port=8765)
     settings = build_transport_security_settings(config)
