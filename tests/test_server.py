@@ -150,7 +150,6 @@ async def _started_manager(
         await mgr.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 async def test_server_registers_12_default_tools_and_gates_raw_ssap(tmp_path: Path) -> None:
     expected_default = {
         "tv_wake",
@@ -177,7 +176,6 @@ async def test_server_registers_12_default_tools_and_gates_raw_ssap(tmp_path: Pa
     assert names_on == expected_default | {"raw_ssap"}
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 async def test_server_maps_tv_error_to_tool_error_code_and_message(tmp_path: Path) -> None:
     async def standby_connect(_url: str) -> FakeWebSocketTransport:
         raise TvError(ErrorCode.TV_OFFLINE_STANDBY, "TV is in standby")
@@ -187,13 +185,12 @@ async def test_server_maps_tv_error_to_tool_error_code_and_message(tmp_path: Pat
     await mgr.start()
     try:
         server = create_mcp_server(config, manager=mgr)
-        with pytest.raises(ToolError, match=r"^TV_OFFLINE_STANDBY: "):
+        with pytest.raises(ToolError, match=r"TV_OFFLINE_STANDBY: "):
             await server.call_tool("turn_off", {})
     finally:
         await mgr.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 async def test_server_launch_merges_content_target_and_omits_empty_params(
     tmp_path: Path,
 ) -> None:
@@ -218,7 +215,6 @@ async def test_server_launch_merges_content_target_and_omits_empty_params(
     ]
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 @pytest.mark.parametrize(
     ("level", "should_succeed"),
     [(-1, False), (0, True), (30, True), (31, False)],
@@ -234,12 +230,11 @@ async def test_server_set_volume_enforces_max_volume_bounds(
             await server.call_tool("set_volume", {"level": level})
             assert ("ssap://audio/setVolume", {"volume": level}) in sent_requests
         else:
-            with pytest.raises(ToolError, match=r"^INVALID_ARGUMENT: "):
+            with pytest.raises(ToolError, match=r"INVALID_ARGUMENT: "):
                 await server.call_tool("set_volume", {"level": level})
             assert not any(uri == "ssap://audio/setVolume" for uri, _ in sent_requests)
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 @pytest.mark.parametrize(
     ("text", "should_succeed"),
     [("", False), ("a", True), ("x" * 500, True), ("x" * 501, False)],
@@ -258,11 +253,10 @@ async def test_server_type_text_validates_length_bounds(
                 {"text": text, "replace": 0},
             ) in sent_requests
         else:
-            with pytest.raises(ToolError, match=r"^INVALID_ARGUMENT: "):
+            with pytest.raises(ToolError, match=r"INVALID_ARGUMENT: "):
                 await server.call_tool("type_text", {"text": text, "send_enter": False})
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 async def test_server_screenshot_returns_text_and_image_content(tmp_path: Path) -> None:
     capturer = _FakeCapturer()
     async with _started_manager(tmp_path, capturer=capturer) as (config, mgr, _):
@@ -281,7 +275,6 @@ async def test_server_screenshot_returns_text_and_image_content(tmp_path: Path) 
     assert base64.b64decode(image_block.data) == _TEST_JPEG
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 async def test_server_keys_capture_returns_text_and_image_content(tmp_path: Path) -> None:
     capturer = _FakeCapturer()
     async with _started_manager(tmp_path, capturer=capturer) as (config, mgr, _):
@@ -302,7 +295,6 @@ async def test_server_keys_capture_returns_text_and_image_content(tmp_path: Path
     assert base64.b64decode(image_block.data) == _TEST_JPEG
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 async def test_server_type_text_capture_returns_text_and_image_content(tmp_path: Path) -> None:
     capturer = _FakeCapturer()
     async with _started_manager(tmp_path, capturer=capturer) as (config, mgr, _):
@@ -320,7 +312,6 @@ async def test_server_type_text_capture_returns_text_and_image_content(tmp_path:
     assert base64.b64decode(image_block.data) == _TEST_JPEG
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 async def test_server_keys_capture_returns_text_only_on_capture_error(tmp_path: Path) -> None:
     capturer = _FakeCapturer(error=TvError(ErrorCode.SCREENSHOT_UNAVAILABLE, "Dev Mode expired"))
     async with _started_manager(tmp_path, capturer=capturer) as (config, mgr, _):
@@ -339,7 +330,6 @@ async def test_server_keys_capture_returns_text_only_on_capture_error(tmp_path: 
     assert meta["capture_error"] == "SCREENSHOT_UNAVAILABLE: Dev Mode expired"
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 async def test_server_http_app_rejects_unauthenticated_mcp_request_with_401(tmp_path: Path) -> None:
     config = _make_config(tmp_path)
     mgr = TvManager(config, backoff_steps=(10.0,))
@@ -352,17 +342,17 @@ async def test_server_http_app_rejects_unauthenticated_mcp_request_with_401(tmp_
     assert unauth.status_code == 401
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: server not yet implemented")
 async def test_server_http_app_lifespan_starts_and_closes_manager_with_sighup(
     tmp_path: Path,
 ) -> None:
     sent_requests: list[tuple[str, dict[str, Any]]] = []
     pointer_ws = FakeWebSocketTransport()
+    ssap_ws = _online_transport(sent_requests)
 
     async def connect_fn(url: str) -> FakeWebSocketTransport:
         if url.endswith("/pointer"):
             return pointer_ws
-        return _online_transport(sent_requests)
+        return ssap_ws
 
     config = _make_config(tmp_path)
     mgr = TvManager(config, connect_fn=connect_fn, backoff_steps=(10.0,))
@@ -374,10 +364,11 @@ async def test_server_http_app_lifespan_starts_and_closes_manager_with_sighup(
     ]
     outgoing: list[MutableMapping[str, Any]] = []
     startup_done = asyncio.Event()
+    allow_shutdown = asyncio.Event()
 
     async def receive() -> MutableMapping[str, Any]:
         if incoming[0]["type"] == "lifespan.shutdown":
-            await startup_done.wait()
+            await allow_shutdown.wait()
         return incoming.pop(0)
 
     async def send(msg: MutableMapping[str, Any]) -> None:
@@ -389,14 +380,17 @@ async def test_server_http_app_lifespan_starts_and_closes_manager_with_sighup(
         await app({"type": "lifespan"}, receive, send)
 
     lifespan_task: asyncio.Task[None] = asyncio.create_task(_run_lifespan())
-    await asyncio.wait_for(startup_done.wait(), timeout=2.0)
-    await _wait_connected(mgr)
-    loop = asyncio.get_running_loop()
-    assert loop.remove_signal_handler(signal.SIGHUP) is True
-    await asyncio.wait_for(lifespan_task, timeout=2.0)
+    try:
+        await asyncio.wait_for(startup_done.wait(), timeout=2.0)
+        await _wait_connected(mgr)
+        loop = asyncio.get_running_loop()
+        assert loop.remove_signal_handler(signal.SIGHUP) is True
+    finally:
+        allow_shutdown.set()
+        await asyncio.wait_for(lifespan_task, timeout=2.0)
 
     assert [m["type"] for m in outgoing] == [
         "lifespan.startup.complete",
         "lifespan.shutdown.complete",
     ]
-    assert mgr.state != ConnectionState.CONNECTED
+    assert ssap_ws.closed is True

@@ -95,6 +95,7 @@ class KeysResult:
     changed_since_last: bool | None = None
     size_bytes: int | None = None
     capture_error: str | None = None
+    image_bytes: bytes | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,3 +108,4 @@ class TextResult:
     changed_since_last: bool | None = None
     size_bytes: int | None = None
     capture_error: str | None = None
+    image_bytes: bytes | None = None
