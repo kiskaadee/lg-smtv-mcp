@@ -81,9 +81,11 @@ class PointerClient:
         self,
         ssap_request_fn: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]],
         connect_fn: WebSocketConnectFn = websockets_connect,
+        sleep_fn: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._ssap_request_fn = ssap_request_fn
         self._connect_fn = connect_fn
+        self._sleep_fn = sleep_fn
         self._ws: WebSocketTransport | None = None
 
     async def _ensure_socket(self) -> WebSocketTransport:
@@ -115,7 +117,7 @@ class PointerClient:
             frame = f"type:button\nname:{key}\n\n"
             await self._send_frame_with_retry(frame)
             if delay_ms > 0 and index < len(normalized) - 1:
-                await asyncio.sleep(delay_ms / 1000.0)
+                await self._sleep_fn(delay_ms / 1000.0)
         return len(normalized)
 
     async def _send_frame_with_retry(self, frame: str) -> None:

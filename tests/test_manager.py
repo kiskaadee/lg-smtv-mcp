@@ -1,6 +1,7 @@
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,8 @@ from lg_smtv_mcp.errors import ErrorCode, TvError
 from lg_smtv_mcp.tv_core.manager import ConnectionState, TvManager
 from lg_smtv_mcp.tv_core.protocols import CaptureResult, WebSocketClosedError
 from tests.conftest import FakeWebSocketTransport
+
+POINTER_URL = "wss://192.0.2.10:3001/ptr"
 
 
 def _make_config(tmp_path: Path, **overrides: Any) -> TvConfig:
@@ -107,54 +110,90 @@ def _make_online_transport(
     return FakeWebSocketTransport(on_send=on_send)
 
 
+def _standby_transport() -> FakeWebSocketTransport:
+    ws = FakeWebSocketTransport()
+    ws.push_close(1008, "Try Again Later (EWS)")
+    return ws
+
+
+def _pointer_socket_reply(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
+    ws.push_json(
+        {
+            "type": "response",
+            "id": msg["id"],
+            "payload": {"returnValue": True, "socketPath": POINTER_URL},
+        }
+    )
+
+
+def _noop_wol(_mac: str, _broadcast: str, _port: int) -> None:
+    pass
+
+
+async def _wait_for(predicate: Callable[[], bool], what: str, timeout: float = 2.0) -> None:
+    """Poll predicate until true; fail loudly (instead of silently continuing) on timeout."""
+    try:
+        async with asyncio.timeout(timeout):
+            while not predicate():
+                await asyncio.sleep(0.005)
+    except TimeoutError:
+        pytest.fail(f"timed out after {timeout}s waiting for {what}")
+
+
+async def _wait_for_state(mgr: TvManager, state: ConnectionState) -> None:
+    await _wait_for(lambda: mgr.state is state, f"ConnectionState.{state.value}")
+
+
+@asynccontextmanager
+async def _started(
+    mgr: TvManager,
+    *,
+    until: ConnectionState | None = ConnectionState.CONNECTED,
+) -> AsyncGenerator[TvManager]:
+    """Start mgr, optionally wait for a state, and always close it (even if a test fails)."""
+    await mgr.start()
+    try:
+        if until is not None:
+            await _wait_for_state(mgr, until)
+        yield mgr
+    finally:
+        await mgr.close()
+
+
+# --- Connection lifecycle ---------------------------------------------------------------
+
+
 async def test_manager_uses_stepped_reconnect_backoff_and_tears_down_capture_on_standby(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cfg = _make_config(tmp_path)
     capturer = _FakeCapturer()
-    wait_timeouts: list[float] = []
-    real_wait_for = asyncio.wait_for
+    waits: list[float] = []
 
-    async def spy_wait_for(aw: Any, timeout: float | None = None) -> Any:
-        if timeout is not None and timeout >= 2.0:
-            wait_timeouts.append(timeout)
-            return await real_wait_for(aw, timeout=0.005)
-        return await real_wait_for(aw, timeout=timeout)
-
-    monkeypatch.setattr(asyncio, "wait_for", spy_wait_for)
-
-    attempts = 0
+    async def fake_wait(_event: asyncio.Event, timeout: float) -> None:
+        waits.append(timeout)
+        await asyncio.sleep(0)
 
     async def connect_standby(_url: str) -> FakeWebSocketTransport:
-        nonlocal attempts
-        attempts += 1
-        ws = FakeWebSocketTransport()
-        ws.push_close(1008, "Try Again Later (EWS)")
-        return ws
+        return _standby_transport()
 
     mgr = TvManager(
-        cfg,
+        _make_config(tmp_path),
         connect_fn=connect_standby,
         capture_client=capturer,
         backoff_steps=(2.0, 5.0, 15.0, 30.0),
+        wait_fn=fake_wait,
     )
-    await mgr.start()
-    for _ in range(50):
-        if len(wait_timeouts) >= 5:
-            break
-        await asyncio.sleep(0.005)
-    await mgr.close()
+    async with _started(mgr, until=None):
+        await _wait_for(lambda: len(waits) >= 5, "5 backoff waits")
 
     assert mgr.state is ConnectionState.STANDBY_OFFLINE
-    assert wait_timeouts[:5] == [2.0, 5.0, 15.0, 30.0, 30.0]
+    assert waits[:5] == [2.0, 5.0, 15.0, 30.0, 30.0]
     assert capturer.closed_count >= 1
 
 
-async def test_manager_wake_coalesces_concurrent_calls_and_handles_connected_and_pairing(
+async def test_manager_wake_coalesces_concurrent_calls_into_single_wol_packet(
     tmp_path: Path,
 ) -> None:
-    cfg = _make_config(tmp_path)
     wol_calls: list[tuple[str, str, int]] = []
     online = False
 
@@ -162,44 +201,58 @@ async def test_manager_wake_coalesces_concurrent_calls_and_handles_connected_and
         wol_calls.append((mac, broadcast, port))
 
     async def connect_fn(_url: str) -> FakeWebSocketTransport:
-        if not online:
-            ws = FakeWebSocketTransport()
-            ws.push_close(1008, "Try Again Later (EWS)")
-            return ws
-        return _make_online_transport()
+        return _make_online_transport() if online else _standby_transport()
 
     mgr = TvManager(
-        cfg,
+        _make_config(tmp_path),
         connect_fn=connect_fn,
         wol_fn=fake_wol,
         backoff_steps=(10.0,),
         wake_poll_interval=0.01,
         wake_timeout=2.0,
     )
-    await mgr.start()
-    await asyncio.sleep(0.02)
-    assert mgr.state is ConnectionState.STANDBY_OFFLINE
+    async with _started(mgr, until=ConnectionState.STANDBY_OFFLINE):
 
-    async def flip_online() -> None:
-        nonlocal online
-        await asyncio.sleep(0.03)
-        online = True
+        async def flip_online() -> None:
+            nonlocal online
+            await asyncio.sleep(0.03)
+            online = True
 
-    flipper = asyncio.create_task(flip_online())
-    res1, res2 = await asyncio.gather(mgr.wake(), mgr.wake())
-    await flipper
+        flipper = asyncio.create_task(flip_online())
+        res1, res2 = await asyncio.gather(mgr.wake(), mgr.wake())
+        await flipper
 
-    assert len(wol_calls) == 1
-    assert res1.status == "connected"
-    assert res2.status == "connected"
-    assert mgr.state is ConnectionState.CONNECTED
+        assert len(wol_calls) == 1
+        assert res1.status == "connected"
+        assert res2.status == "connected"
+        assert mgr.state is ConnectionState.CONNECTED
 
-    already = await mgr.wake()
+
+async def test_manager_wake_returns_already_connected_without_sending_wol(
+    tmp_path: Path,
+) -> None:
+    wol_calls: list[tuple[str, str, int]] = []
+
+    def fake_wol(mac: str, broadcast: str, port: int) -> None:
+        wol_calls.append((mac, broadcast, port))
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _make_online_transport()
+
+    mgr = TvManager(
+        _make_config(tmp_path), connect_fn=connect_fn, wol_fn=fake_wol, backoff_steps=(10.0,)
+    )
+    async with _started(mgr):
+        already = await mgr.wake()
+
     assert already.status == "already_connected"
     assert already.elapsed_ms == 0
-    await mgr.close()
+    assert wol_calls == []
 
-    # PAIRING_REQUIRED fast-fail
+
+async def test_manager_wake_fails_fast_with_pairing_required_when_unpaired(
+    tmp_path: Path,
+) -> None:
     def on_send_prompt(raw: str, ws: FakeWebSocketTransport) -> None:
         msg = json.loads(raw)
         if msg["type"] == "register":
@@ -214,46 +267,35 @@ async def test_manager_wake_coalesces_concurrent_calls_and_handles_connected_and
     async def connect_prompt(_url: str) -> FakeWebSocketTransport:
         return FakeWebSocketTransport(on_send=on_send_prompt)
 
-    mgr_pair = TvManager(cfg, connect_fn=connect_prompt, wol_fn=fake_wol, backoff_steps=(10.0,))
-    await mgr_pair.start()
-    await asyncio.sleep(0.02)
-    assert mgr_pair.state is ConnectionState.PAIRING_REQUIRED
-    with pytest.raises(TvError) as exc_pair:
-        await mgr_pair.wake()
+    mgr = TvManager(
+        _make_config(tmp_path), connect_fn=connect_prompt, wol_fn=_noop_wol, backoff_steps=(10.0,)
+    )
+    async with _started(mgr, until=ConnectionState.PAIRING_REQUIRED):
+        with pytest.raises(TvError) as exc_pair:
+            await mgr.wake()
+
     assert exc_pair.value.code is ErrorCode.PAIRING_REQUIRED
-    await mgr_pair.close()
-
-
-def _noop_wol(_mac: str, _broadcast: str, _port: int) -> None:
-    pass
 
 
 async def test_manager_wake_raises_wake_timeout_when_tv_never_comes_online(
     tmp_path: Path,
 ) -> None:
-    cfg = _make_config(tmp_path)
-
     async def connect_standby(_url: str) -> FakeWebSocketTransport:
-        ws = FakeWebSocketTransport()
-        ws.push_close(1008, "Try Again Later (EWS)")
-        return ws
+        return _standby_transport()
 
     mgr = TvManager(
-        cfg,
+        _make_config(tmp_path),
         connect_fn=connect_standby,
         wol_fn=_noop_wol,
         backoff_steps=(10.0,),
         wake_poll_interval=0.01,
         wake_timeout=0.05,
     )
-    await mgr.start()
-    await asyncio.sleep(0.02)
-
-    with pytest.raises(TvError) as exc_info:
-        await mgr.wake()
-    assert exc_info.value.code is ErrorCode.WAKE_TIMEOUT
-    assert mgr.state is ConnectionState.STANDBY_OFFLINE
-    await mgr.close()
+    async with _started(mgr, until=ConnectionState.STANDBY_OFFLINE):
+        with pytest.raises(TvError) as exc_info:
+            await mgr.wake()
+        assert exc_info.value.code is ErrorCode.WAKE_TIMEOUT
+        assert mgr.state is ConnectionState.STANDBY_OFFLINE
 
 
 async def test_manager_reloads_client_key_on_sighup_and_stays_in_pairing_on_bad_json(
@@ -287,30 +329,21 @@ async def test_manager_reloads_client_key_on_sighup_and_stays_in_pairing_on_bad_
         return FakeWebSocketTransport(on_send=on_send_check_key)
 
     mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
-    await mgr.start()
-    await asyncio.sleep(0.02)
-    assert mgr.state is ConnectionState.PAIRING_REQUIRED
+    async with _started(mgr, until=ConnectionState.PAIRING_REQUIRED):
+        # Reload with malformed JSON stays in PAIRING_REQUIRED (absence check: short grace period).
+        mgr.reload_client_key()
+        await asyncio.sleep(0.02)
+        assert mgr.state is ConnectionState.PAIRING_REQUIRED
 
-    # Reload with malformed JSON stays in PAIRING_REQUIRED.
-    mgr.reload_client_key()
-    await asyncio.sleep(0.02)
-    assert mgr.state is ConnectionState.PAIRING_REQUIRED
-
-    # Write valid JSON and reload -> transitions to CONNECTED.
-    key_path.write_text(json.dumps({"192.0.2.10": "fresh-key"}), encoding="utf-8")
-    mgr.reload_client_key()
-    for _ in range(30):
-        if mgr.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
-    assert mgr.get_state().connected is True
-    await mgr.close()
+        # Write valid JSON and reload -> transitions to CONNECTED.
+        key_path.write_text(json.dumps({"192.0.2.10": "fresh-key"}), encoding="utf-8")
+        mgr.reload_client_key()
+        await _wait_for(lambda: mgr.get_state().connected, "connected after key reload")
 
 
 async def test_manager_caches_subscribe_state_and_returns_lock_free_offline_snapshot(
     tmp_path: Path,
 ) -> None:
-    cfg = _make_config(tmp_path)
     transport = _make_online_transport(
         volume=27,
         mute=True,
@@ -322,49 +355,34 @@ async def test_manager_caches_subscribe_state_and_returns_lock_free_offline_snap
     async def connect_fn(_url: str) -> FakeWebSocketTransport:
         nonlocal connects
         connects += 1
-        if connects == 1:
-            return transport
-        ws = FakeWebSocketTransport()
-        ws.push_close(1008, "Try Again Later (EWS)")
-        return ws
+        return transport if connects == 1 else _standby_transport()
 
-    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
-    await mgr.start()
-    for _ in range(30):
-        if mgr.state is ConnectionState.CONNECTED:
-            break
-        await asyncio.sleep(0.01)
+    mgr = TvManager(_make_config(tmp_path), connect_fn=connect_fn, backoff_steps=(10.0,))
+    async with _started(mgr):
+        snap_online = mgr.get_state()
+        assert snap_online.connected is True
+        assert snap_online.stale is False
+        assert snap_online.volume == 27
+        assert snap_online.muted is True
+        assert snap_online.sound_output == "external_arc"
+        assert snap_online.foreground_app == "netflix"
+        assert snap_online.last_updated is not None
 
-    snap_online = mgr.get_state()
-    assert snap_online.connected is True
-    assert snap_online.stale is False
-    assert snap_online.volume == 27
-    assert snap_online.muted is True
-    assert snap_online.sound_output == "external_arc"
-    assert snap_online.foreground_app == "netflix"
-    assert snap_online.last_updated is not None
+        # Drop connection and verify cached values remain available offline.
+        transport.push_error(WebSocketClosedError(1008, "Try Again Later (EWS)"))
+        await _wait_for_state(mgr, ConnectionState.STANDBY_OFFLINE)
 
-    # Drop connection and verify cached values remain available offline.
-    transport.push_error(WebSocketClosedError(1008, "Try Again Later (EWS)"))
-    for _ in range(30):
-        if mgr.state is ConnectionState.STANDBY_OFFLINE:
-            break
-        await asyncio.sleep(0.01)
-
-    snap_offline = mgr.get_state()
-    assert snap_offline.connected is False
-    assert snap_offline.stale is True
-    assert snap_offline.volume == 27
-    assert snap_offline.sound_output == "external_arc"
-    assert snap_offline.foreground_app == "netflix"
-    await mgr.close()
+        snap_offline = mgr.get_state()
+        assert snap_offline.connected is False
+        assert snap_offline.stale is True
+        assert snap_offline.volume == 27
+        assert snap_offline.sound_output == "external_arc"
+        assert snap_offline.foreground_app == "netflix"
 
 
 async def test_manager_transitions_to_pairing_required_on_subscription_401(
     tmp_path: Path,
 ) -> None:
-    cfg = _make_config(tmp_path)
-
     def on_send_401(raw: str, ws: FakeWebSocketTransport) -> None:
         msg = json.loads(raw)
         if msg["type"] == "register":
@@ -382,254 +400,14 @@ async def test_manager_transitions_to_pairing_required_on_subscription_401(
     async def connect_fn(_url: str) -> FakeWebSocketTransport:
         return FakeWebSocketTransport(on_send=on_send_401)
 
-    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
-    await mgr.start()
-    for _ in range(30):
-        if mgr.state is ConnectionState.PAIRING_REQUIRED:
-            break
-        await asyncio.sleep(0.01)
-
-    assert mgr.state is ConnectionState.PAIRING_REQUIRED
-    await mgr.close()
-
-
-async def test_manager_ui_lock_times_out_with_lock_timeout(tmp_path: Path) -> None:
-    cfg = _make_config(tmp_path)
-    gate = asyncio.Event()
-    capturer = _FakeCapturer(gate=gate)
-
-    async def connect_fn(_url: str) -> FakeWebSocketTransport:
-        return _make_online_transport()
-
-    mgr = TvManager(
-        cfg,
-        connect_fn=connect_fn,
-        capture_client=capturer,
-        backoff_steps=(10.0,),
-        ui_lock_timeout=0.02,
-    )
-    await mgr.start()
-    for _ in range(30):
-        if mgr.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
-
-    holder = asyncio.create_task(mgr.screenshot())
-    await asyncio.sleep(0.01)
-    try:
-        with pytest.raises(TvError) as exc_info:
-            await mgr.screenshot()
-        assert exc_info.value.code is ErrorCode.LOCK_TIMEOUT
-    finally:
-        gate.set()
-        await holder
-        await mgr.close()
-
-
-@pytest.mark.parametrize(
-    ("keys", "delay_ms", "settle_ms"),
-    [
-        ([], 250, 0),
-        (["UP"] * 21, 250, 0),
-        (["UP"], -1, 0),
-        (["UP"], 501, 0),
-        (["UP"], 0, -1),
-        (["UP"], 0, 2001),
-    ],
-)
-async def test_manager_send_keys_validates_bounds_with_invalid_argument(
-    tmp_path: Path,
-    keys: list[str],
-    delay_ms: int,
-    settle_ms: int,
-) -> None:
-    cfg = _make_config(tmp_path)
-
-    async def connect_fn(_url: str) -> FakeWebSocketTransport:
-        return _make_online_transport()
-
-    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
-    await mgr.start()
-    for _ in range(30):
-        if mgr.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
-
-    with pytest.raises(TvError) as exc_info:
-        await mgr.send_keys(keys, delay_ms=delay_ms, settle_ms=settle_ms)
-    assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
-    await mgr.close()
-
-
-async def test_manager_send_keys_capture_returns_partial_success_when_capture_unavailable(
-    tmp_path: Path,
-) -> None:
-    cfg = _make_config(tmp_path)
-    pointer_ws = FakeWebSocketTransport()
-    ssap_ws = _make_online_transport(
-        on_request=lambda msg, ws: ws.push_json(
-            {
-                "type": "response",
-                "id": msg["id"],
-                "payload": {"returnValue": True, "socketPath": "wss://192.0.2.10:3001/ptr"},
-            }
-        )
-    )
-
-    async def connect_fn(url: str) -> FakeWebSocketTransport:
-        return pointer_ws if "/ptr" in url else ssap_ws
-
-    # Case 1: capture_client is None
-    mgr_none = TvManager(cfg, connect_fn=connect_fn, capture_client=None, backoff_steps=(10.0,))
-    await mgr_none.start()
-    for _ in range(30):
-        if mgr_none.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
-
-    res_none = await mgr_none.send_keys(["UP", "ENTER"], delay_ms=0, settle_ms=0, capture=True)
-    assert res_none.keys_sent is True
-    assert res_none.count == 2
-    assert res_none.capture_error is not None
-    assert "SCREENSHOT_UNAVAILABLE" in res_none.capture_error
-    await mgr_none.close()
-
-    # Case 2: capture_client raises SCREENSHOT_UNAVAILABLE
-    pointer_ws2 = FakeWebSocketTransport()
-    ssap_ws2 = _make_online_transport(
-        on_request=lambda msg, ws: ws.push_json(
-            {
-                "type": "response",
-                "id": msg["id"],
-                "payload": {"returnValue": True, "socketPath": "wss://192.0.2.10:3001/ptr"},
-            }
-        )
-    )
-
-    async def connect_fn2(url: str) -> FakeWebSocketTransport:
-        return pointer_ws2 if "/ptr" in url else ssap_ws2
-
-    failing_capturer = _FakeCapturer(
-        error=TvError(ErrorCode.SCREENSHOT_UNAVAILABLE, "Dev Mode expired")
-    )
-    mgr_err = TvManager(
-        cfg, connect_fn=connect_fn2, capture_client=failing_capturer, backoff_steps=(10.0,)
-    )
-    await mgr_err.start()
-    for _ in range(30):
-        if mgr_err.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
-
-    res_err = await mgr_err.send_keys(["DOWN"], delay_ms=0, settle_ms=0, capture=True)
-    assert res_err.keys_sent is True
-    assert res_err.count == 1
-    assert res_err.capture_error == "SCREENSHOT_UNAVAILABLE: Dev Mode expired"
-    await mgr_err.close()
-
-
-async def test_manager_screenshot_raises_unavailable_when_capture_client_is_none(
-    tmp_path: Path,
-) -> None:
-    cfg = _make_config(tmp_path)
-
-    async def connect_fn(_url: str) -> FakeWebSocketTransport:
-        return _make_online_transport()
-
-    mgr = TvManager(cfg, connect_fn=connect_fn, capture_client=None, backoff_steps=(10.0,))
-    await mgr.start()
-    for _ in range(30):
-        if mgr.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
-
-    with pytest.raises(TvError) as exc_info:
-        await mgr.screenshot()
-    assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
-    await mgr.close()
-
-
-async def test_manager_set_volume_enforces_max_volume_guardrail(tmp_path: Path) -> None:
-    cfg = _make_config(tmp_path, max_volume=35)
-    sent_requests: list[tuple[str, dict[str, Any]]] = []
-
-    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
-        sent_requests.append((msg["uri"], msg["payload"]))
-        ws.push_json({"type": "response", "id": msg["id"], "payload": {"returnValue": True}})
-
-    async def connect_fn(_url: str) -> FakeWebSocketTransport:
-        return _make_online_transport(on_request=on_request)
-
-    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
-    await mgr.start()
-    for _ in range(30):
-        if mgr.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
-
-    for bad_level in (-1, 36):
-        with pytest.raises(TvError) as exc_info:
-            await mgr.set_volume(bad_level)
-        assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
-
-    await mgr.set_volume(20)
-    assert sent_requests == [("ssap://audio/setVolume", {"volume": 20})]
-    await mgr.close()
-
-
-async def test_manager_mvp_ssap_controls_launch_list_mute_and_turn_off(tmp_path: Path) -> None:
-    cfg = _make_config(tmp_path)
-    sent_requests: list[tuple[str, dict[str, Any]]] = []
-
-    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
-        uri = msg["uri"]
-        sent_requests.append((uri, msg["payload"]))
-        if uri == "ssap://com.webos.applicationManager/listLaunchPoints":
-            ws.push_json(
-                {
-                    "type": "response",
-                    "id": msg["id"],
-                    "payload": {
-                        "returnValue": True,
-                        "launchPoints": [{"id": "netflix", "title": "Netflix"}],
-                    },
-                }
-            )
-        else:
-            ws.push_json({"type": "response", "id": msg["id"], "payload": {"returnValue": True}})
-
-    async def connect_fn(_url: str) -> FakeWebSocketTransport:
-        return _make_online_transport(on_request=on_request)
-
-    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
-    await mgr.start()
-    for _ in range(30):
-        if mgr.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
-
-    await mgr.launch_app("youtube.leanback.v4", content_target="v=abc&t=10s")
-    apps = await mgr.list_apps()
-    await mgr.set_mute(True)
-    await mgr.turn_off()
-
-    assert apps == [{"id": "netflix", "title": "Netflix"}]
-    assert sent_requests == [
-        (
-            "ssap://system.launcher/launch",
-            {"id": "youtube.leanback.v4", "params": {"contentTarget": "v=abc&t=10s"}},
-        ),
-        ("ssap://com.webos.applicationManager/listLaunchPoints", {}),
-        ("ssap://audio/setMute", {"mute": True}),
-        ("ssap://system/turnOff", {}),
-    ]
-    await mgr.close()
+    mgr = TvManager(_make_config(tmp_path), connect_fn=connect_fn, backoff_steps=(10.0,))
+    async with _started(mgr, until=ConnectionState.PAIRING_REQUIRED):
+        assert mgr.state is ConnectionState.PAIRING_REQUIRED
 
 
 async def test_manager_wake_pairing_failure_clears_wake_requested_and_respects_backoff(
     tmp_path: Path,
 ) -> None:
-    cfg = _make_config(tmp_path)
     connect_attempts = 0
     return_prompt = False
 
@@ -653,60 +431,319 @@ async def test_manager_wake_pairing_failure_clears_wake_requested_and_respects_b
         return FakeWebSocketTransport(on_send=on_send)
 
     mgr = TvManager(
-        cfg,
+        _make_config(tmp_path),
         connect_fn=connect_fn,
         wol_fn=_noop_wol,
         backoff_steps=(1.0,),
         wake_poll_interval=0.01,
         wake_timeout=1.0,
     )
-    await mgr.start()
-    await asyncio.sleep(0.02)
-    assert mgr.state is ConnectionState.STANDBY_OFFLINE
+    async with _started(mgr, until=ConnectionState.STANDBY_OFFLINE):
+        return_prompt = True
+        with pytest.raises(TvError) as exc_info:
+            await mgr.wake()
+        assert exc_info.value.code is ErrorCode.PAIRING_REQUIRED
 
-    return_prompt = True
-    with pytest.raises(TvError) as exc_info:
-        await mgr.wake()
-    assert exc_info.value.code is ErrorCode.PAIRING_REQUIRED
-
-    attempts_after_wake = connect_attempts
-    await asyncio.sleep(0.05)
-    assert connect_attempts == attempts_after_wake
-    await mgr.close()
+        # Absence check: no busy-loop reconnects within the 1.0s backoff window.
+        attempts_after_wake = connect_attempts
+        await asyncio.sleep(0.05)
+        assert connect_attempts == attempts_after_wake
 
 
-async def test_manager_type_text_bounds_and_capture_partial_success(tmp_path: Path) -> None:
-    cfg = _make_config(tmp_path)
-    sent_requests: list[tuple[str, dict[str, Any]]] = []
+# --- UI lock & capture ------------------------------------------------------------------
 
-    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
-        sent_requests.append((msg["uri"], msg["payload"]))
-        ws.push_json({"type": "response", "id": msg["id"], "payload": {"returnValue": True}})
+
+async def test_manager_ui_lock_times_out_with_lock_timeout(tmp_path: Path) -> None:
+    gate = asyncio.Event()
+    capturer = _FakeCapturer(gate=gate)
 
     async def connect_fn(_url: str) -> FakeWebSocketTransport:
-        return _make_online_transport(on_request=on_request)
+        return _make_online_transport()
+
+    mgr = TvManager(
+        _make_config(tmp_path),
+        connect_fn=connect_fn,
+        capture_client=capturer,
+        backoff_steps=(10.0,),
+        ui_lock_timeout=0.02,
+    )
+    async with _started(mgr):
+        holder = asyncio.create_task(mgr.screenshot())
+        try:
+            # Deterministic: wait until the holder is inside the capture (holding the lock).
+            await _wait_for(lambda: capturer.calls == 1, "first screenshot to hold the UI lock")
+            with pytest.raises(TvError) as exc_info:
+                await mgr.screenshot()
+            assert exc_info.value.code is ErrorCode.LOCK_TIMEOUT
+        finally:
+            gate.set()
+            await holder
+
+
+async def test_manager_screenshot_raises_unavailable_when_capture_client_is_none(
+    tmp_path: Path,
+) -> None:
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _make_online_transport()
+
+    mgr = TvManager(
+        _make_config(tmp_path), connect_fn=connect_fn, capture_client=None, backoff_steps=(10.0,)
+    )
+    async with _started(mgr):
+        with pytest.raises(TvError) as exc_info:
+            await mgr.screenshot()
+
+    assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
+
+
+# --- send_keys ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("keys", "delay_ms", "settle_ms"),
+    [
+        ([], 250, 0),
+        (["UP"] * 21, 250, 0),
+        (["UP"], -1, 0),
+        (["UP"], 501, 0),
+        (["UP"], 0, -1),
+        (["UP"], 0, 2001),
+    ],
+)
+async def test_manager_send_keys_rejects_out_of_bounds_args_without_sending(
+    tmp_path: Path,
+    keys: list[str],
+    delay_ms: int,
+    settle_ms: int,
+) -> None:
+    pointer_ws = FakeWebSocketTransport()
+    ssap_ws = _make_online_transport(on_request=_pointer_socket_reply)
+
+    async def connect_fn(url: str) -> FakeWebSocketTransport:
+        return pointer_ws if url == POINTER_URL else ssap_ws
+
+    mgr = TvManager(_make_config(tmp_path), connect_fn=connect_fn, backoff_steps=(10.0,))
+    async with _started(mgr):
+        with pytest.raises(TvError) as exc_info:
+            await mgr.send_keys(keys, delay_ms=delay_ms, settle_ms=settle_ms)
+
+    assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+    assert pointer_ws.sent == []
+
+
+@pytest.mark.parametrize(
+    ("keys", "delay_ms", "settle_ms"),
+    [
+        (["UP"] * 20, 0, 0),
+        (["UP"], 0, 0),
+        (["UP"], 500, 0),
+        (["UP"], 0, 2000),
+    ],
+)
+async def test_manager_send_keys_accepts_inclusive_boundary_values(
+    tmp_path: Path,
+    keys: list[str],
+    delay_ms: int,
+    settle_ms: int,
+) -> None:
+    pointer_ws = FakeWebSocketTransport()
+    ssap_ws = _make_online_transport(on_request=_pointer_socket_reply)
+
+    async def connect_fn(url: str) -> FakeWebSocketTransport:
+        return pointer_ws if url == POINTER_URL else ssap_ws
+
+    mgr = TvManager(_make_config(tmp_path), connect_fn=connect_fn, backoff_steps=(10.0,))
+    async with _started(mgr):
+        res = await mgr.send_keys(keys, delay_ms=delay_ms, settle_ms=settle_ms)
+
+    assert res.keys_sent is True
+    assert res.count == len(keys)
+    assert len(pointer_ws.sent) == len(keys)
+
+
+@pytest.mark.parametrize(
+    ("capturer", "expected_error"),
+    [
+        (None, "SCREENSHOT_UNAVAILABLE"),
+        (
+            _FakeCapturer(error=TvError(ErrorCode.SCREENSHOT_UNAVAILABLE, "Dev Mode expired")),
+            "SCREENSHOT_UNAVAILABLE: Dev Mode expired",
+        ),
+    ],
+    ids=["no_capture_client", "capture_client_raises"],
+)
+async def test_manager_send_keys_capture_returns_partial_success_when_capture_unavailable(
+    tmp_path: Path,
+    capturer: _FakeCapturer | None,
+    expected_error: str,
+) -> None:
+    pointer_ws = FakeWebSocketTransport()
+    ssap_ws = _make_online_transport(on_request=_pointer_socket_reply)
+
+    async def connect_fn(url: str) -> FakeWebSocketTransport:
+        return pointer_ws if url == POINTER_URL else ssap_ws
+
+    mgr = TvManager(
+        _make_config(tmp_path),
+        connect_fn=connect_fn,
+        capture_client=capturer,
+        backoff_steps=(10.0,),
+    )
+    async with _started(mgr):
+        res = await mgr.send_keys(["UP", "ENTER"], delay_ms=0, settle_ms=0, capture=True)
+
+    assert res.keys_sent is True
+    assert res.count == 2
+    assert res.capture_error is not None
+    assert expected_error in res.capture_error
+    assert pointer_ws.sent == ["type:button\nname:UP\n\n", "type:button\nname:ENTER\n\n"]
+
+
+# --- SSAP controls -----------------------------------------------------------------------
+
+
+def _recording_transport(
+    sent_requests: list[tuple[str, dict[str, Any]]],
+    replies: dict[str, dict[str, Any]] | None = None,
+) -> FakeWebSocketTransport:
+    """Online transport that records requests and answers per-URI (default returnValue=True)."""
+    replies = replies or {}
+
+    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
+        uri = msg["uri"]
+        sent_requests.append((uri, msg["payload"]))
+        payload = {"returnValue": True, **replies.get(uri, {})}
+        ws.push_json({"type": "response", "id": msg["id"], "payload": payload})
+
+    return _make_online_transport(on_request=on_request)
+
+
+@pytest.mark.parametrize("level", [0, 20, 35])
+async def test_manager_set_volume_accepts_levels_within_inclusive_max_volume(
+    tmp_path: Path, level: int
+) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _recording_transport(sent_requests)
+
+    mgr = TvManager(
+        _make_config(tmp_path, max_volume=35), connect_fn=connect_fn, backoff_steps=(10.0,)
+    )
+    async with _started(mgr):
+        await mgr.set_volume(level)
+
+    assert sent_requests == [("ssap://audio/setVolume", {"volume": level})]
+
+
+@pytest.mark.parametrize("level", [-1, 36])
+async def test_manager_set_volume_rejects_levels_outside_max_volume_without_sending(
+    tmp_path: Path, level: int
+) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _recording_transport(sent_requests)
+
+    mgr = TvManager(
+        _make_config(tmp_path, max_volume=35), connect_fn=connect_fn, backoff_steps=(10.0,)
+    )
+    async with _started(mgr):
+        with pytest.raises(TvError) as exc_info:
+            await mgr.set_volume(level)
+
+    assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+    assert sent_requests == []
+
+
+async def test_manager_mvp_ssap_controls_send_expected_uris_and_payloads(tmp_path: Path) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+    replies = {
+        "ssap://com.webos.applicationManager/listLaunchPoints": {
+            "launchPoints": [{"id": "netflix", "title": "Netflix"}]
+        }
+    }
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _recording_transport(sent_requests, replies)
+
+    mgr = TvManager(_make_config(tmp_path), connect_fn=connect_fn, backoff_steps=(10.0,))
+    async with _started(mgr):
+        await mgr.launch_app("youtube.leanback.v4", content_target="v=abc&t=10s")
+        apps = await mgr.list_apps()
+        await mgr.set_mute(True)
+        await mgr.turn_off()
+
+    assert apps == [{"id": "netflix", "title": "Netflix"}]
+    assert sent_requests == [
+        (
+            "ssap://system.launcher/launch",
+            {"id": "youtube.leanback.v4", "params": {"contentTarget": "v=abc&t=10s"}},
+        ),
+        ("ssap://com.webos.applicationManager/listLaunchPoints", {}),
+        ("ssap://audio/setMute", {"mute": True}),
+        ("ssap://system/turnOff", {}),
+    ]
+
+
+@pytest.mark.parametrize("bad_text", ["", "x" * 501])
+async def test_manager_type_text_rejects_out_of_bounds_length_without_sending(
+    tmp_path: Path, bad_text: str
+) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _recording_transport(sent_requests)
+
+    mgr = TvManager(_make_config(tmp_path), connect_fn=connect_fn, backoff_steps=(10.0,))
+    async with _started(mgr):
+        with pytest.raises(TvError) as exc_info:
+            await mgr.type_text(bad_text)
+
+    assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
+    assert sent_requests == []
+
+
+@pytest.mark.parametrize("text", ["a", "x" * 500])
+async def test_manager_type_text_accepts_inclusive_boundary_lengths(
+    tmp_path: Path, text: str
+) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _recording_transport(sent_requests)
+
+    mgr = TvManager(_make_config(tmp_path), connect_fn=connect_fn, backoff_steps=(10.0,))
+    async with _started(mgr):
+        res = await mgr.type_text(text, send_enter=False)
+
+    assert res.text_sent is True
+    assert res.enter_sent is False
+    assert sent_requests == [
+        ("ssap://com.webos.service.ime/insertText", {"text": text, "replace": 0})
+    ]
+
+
+async def test_manager_type_text_capture_returns_partial_success_when_capture_fails(
+    tmp_path: Path,
+) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _recording_transport(sent_requests)
 
     failing_capturer = _FakeCapturer(
         error=TvError(ErrorCode.SCREENSHOT_UNAVAILABLE, "Dev Mode expired")
     )
     mgr = TvManager(
-        cfg,
+        _make_config(tmp_path),
         connect_fn=connect_fn,
         capture_client=failing_capturer,
         backoff_steps=(10.0,),
     )
-    await mgr.start()
-    for _ in range(30):
-        if mgr.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
+    async with _started(mgr):
+        res = await mgr.type_text("anime", send_enter=True, capture=True)
 
-    for bad_text in ("", "x" * 501):
-        with pytest.raises(TvError) as exc_info:
-            await mgr.type_text(bad_text)
-        assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
-
-    res = await mgr.type_text("anime", send_enter=True, capture=True)
     assert res.text_sent is True
     assert res.enter_sent is True
     assert res.capture_error == "SCREENSHOT_UNAVAILABLE: Dev Mode expired"
@@ -714,86 +751,60 @@ async def test_manager_type_text_bounds_and_capture_partial_success(tmp_path: Pa
         ("ssap://com.webos.service.ime/insertText", {"text": "anime", "replace": 0}),
         ("ssap://com.webos.service.ime/sendEnterKey", {}),
     ]
-    await mgr.close()
 
 
-async def test_manager_list_inputs_and_switch_input(tmp_path: Path) -> None:
-    cfg = _make_config(tmp_path)
+async def test_manager_list_inputs_and_switch_input_send_expected_uris(tmp_path: Path) -> None:
     sent_requests: list[tuple[str, dict[str, Any]]] = []
-
-    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
-        uri = msg["uri"]
-        sent_requests.append((uri, msg["payload"]))
-        if uri == "ssap://tv/getExternalInputList":
-            ws.push_json(
-                {
-                    "type": "response",
-                    "id": msg["id"],
-                    "payload": {
-                        "returnValue": True,
-                        "devices": [{"id": "HDMI_1", "label": "HDMI 1", "connected": True}],
-                    },
-                }
-            )
-        else:
-            ws.push_json({"type": "response", "id": msg["id"], "payload": {"returnValue": True}})
+    replies = {
+        "ssap://tv/getExternalInputList": {
+            "devices": [{"id": "HDMI_1", "label": "HDMI 1", "connected": True}]
+        }
+    }
 
     async def connect_fn(_url: str) -> FakeWebSocketTransport:
-        return _make_online_transport(on_request=on_request)
+        return _recording_transport(sent_requests, replies)
 
-    mgr = TvManager(cfg, connect_fn=connect_fn, backoff_steps=(10.0,))
-    await mgr.start()
-    for _ in range(30):
-        if mgr.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
-
-    inputs = await mgr.list_inputs()
-    await mgr.switch_input("HDMI_1")
+    mgr = TvManager(_make_config(tmp_path), connect_fn=connect_fn, backoff_steps=(10.0,))
+    async with _started(mgr):
+        inputs = await mgr.list_inputs()
+        await mgr.switch_input("HDMI_1")
 
     assert inputs == [{"id": "HDMI_1", "label": "HDMI 1", "connected": True}]
     assert sent_requests == [
         ("ssap://tv/getExternalInputList", {}),
         ("ssap://tv/switchInput", {"inputId": "HDMI_1"}),
     ]
-    await mgr.close()
 
 
-async def test_manager_raw_ssap_respects_enable_raw_ssap_gate(tmp_path: Path) -> None:
+async def test_manager_raw_ssap_rejects_when_disabled_without_sending(tmp_path: Path) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+
     async def connect_fn(_url: str) -> FakeWebSocketTransport:
-        return _make_online_transport(
-            on_request=lambda msg, ws: ws.push_json(
-                {"type": "response", "id": msg["id"], "payload": {"returnValue": True, "ok": 1}}
-            )
-        )
+        return _recording_transport(sent_requests)
 
-    mgr_disabled = TvManager(
-        _make_config(tmp_path, enable_raw_ssap=False),
-        connect_fn=connect_fn,
-        backoff_steps=(10.0,),
+    mgr = TvManager(
+        _make_config(tmp_path, enable_raw_ssap=False), connect_fn=connect_fn, backoff_steps=(10.0,)
     )
-    await mgr_disabled.start()
-    for _ in range(30):
-        if mgr_disabled.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
+    async with _started(mgr):
+        with pytest.raises(TvError) as exc_info:
+            await mgr.raw_ssap("ssap://system/getSystemInfo")
 
-    with pytest.raises(TvError) as exc_info:
-        await mgr_disabled.raw_ssap("ssap://system/getSystemInfo")
     assert exc_info.value.code is ErrorCode.INVALID_ARGUMENT
-    await mgr_disabled.close()
+    assert sent_requests == []
 
-    mgr_enabled = TvManager(
-        _make_config(tmp_path, enable_raw_ssap=True),
-        connect_fn=connect_fn,
-        backoff_steps=(10.0,),
+
+async def test_manager_raw_ssap_forwards_request_when_enabled(tmp_path: Path) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+    replies = {"ssap://system/getSystemInfo": {"ok": 1}}
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        return _recording_transport(sent_requests, replies)
+
+    mgr = TvManager(
+        _make_config(tmp_path, enable_raw_ssap=True), connect_fn=connect_fn, backoff_steps=(10.0,)
     )
-    await mgr_enabled.start()
-    for _ in range(30):
-        if mgr_enabled.get_state().connected:
-            break
-        await asyncio.sleep(0.01)
+    async with _started(mgr):
+        resp = await mgr.raw_ssap("ssap://system/getSystemInfo", {"x": 1})
 
-    resp = await mgr_enabled.raw_ssap("ssap://system/getSystemInfo", {"x": 1})
     assert resp == {"returnValue": True, "ok": 1}
-    await mgr_enabled.close()
+    assert sent_requests == [("ssap://system/getSystemInfo", {"x": 1})]

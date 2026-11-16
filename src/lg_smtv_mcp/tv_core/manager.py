@@ -5,7 +5,7 @@ import json
 import logging
 import socket
 import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -26,6 +26,14 @@ from lg_smtv_mcp.tv_core.protocols import (
 from lg_smtv_mcp.tv_core.ssap import SsapClient, websockets_connect
 
 logger = logging.getLogger(__name__)
+
+type EventWaitFn = Callable[[asyncio.Event, float], Awaitable[None]]
+
+
+async def wait_event_or_timeout(event: asyncio.Event, timeout: float) -> None:
+    """Wait until event is set or timeout seconds elapse, whichever comes first."""
+    with suppress(TimeoutError):
+        await asyncio.wait_for(event.wait(), timeout=timeout)
 
 
 class ConnectionState(StrEnum):
@@ -81,11 +89,13 @@ class TvManager:
         wake_poll_interval: float = 1.0,
         wake_timeout: float = 45.0,
         ui_lock_timeout: float = 25.0,
+        wait_fn: EventWaitFn = wait_event_or_timeout,
     ) -> None:
         self._config = config
         self._connect_fn = connect_fn
         self._capture_client = capture_client
         self._wol_fn = wol_fn
+        self._wait_fn = wait_fn
         self._backoff_steps = backoff_steps
         self._wake_poll_interval = wake_poll_interval
         self._wake_timeout = wake_timeout
@@ -284,10 +294,7 @@ class TvManager:
                 self._reload_requested = False
                 return current_idx
 
-            try:
-                await asyncio.wait_for(self._wake_or_reload_event.wait(), timeout=delay)
-            except TimeoutError:
-                pass
+            await self._wait_fn(self._wake_or_reload_event, delay)
 
             if self.state is ConnectionState.PAIRING_REQUIRED and not self._wake_requested:
                 self._reload_requested = False

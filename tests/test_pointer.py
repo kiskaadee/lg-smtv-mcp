@@ -1,4 +1,3 @@
-import asyncio
 from typing import Any
 
 import pytest
@@ -53,14 +52,12 @@ async def test_pointer_rejects_unknown_keys_and_newlines_with_invalid_argument(
     assert ws.sent == []
 
 
-async def test_pointer_paces_buttons_by_delay_ms(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_pointer_paces_buttons_by_delay_ms() -> None:
     ws = FakeWebSocketTransport()
     sleeps: list[float] = []
 
     async def fake_sleep(seconds: float) -> None:
         sleeps.append(seconds)
-
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     async def fake_ssap(_uri: str, _payload: dict[str, Any]) -> dict[str, Any]:
         return {"socketPath": "wss://192.0.2.10:3001/pointer/1"}
@@ -68,7 +65,7 @@ async def test_pointer_paces_buttons_by_delay_ms(monkeypatch: pytest.MonkeyPatch
     async def fake_connect(_url: str) -> FakeWebSocketTransport:
         return ws
 
-    client = PointerClient(fake_ssap, connect_fn=fake_connect)
+    client = PointerClient(fake_ssap, connect_fn=fake_connect, sleep_fn=fake_sleep)
     await client.send_buttons(["LEFT", "RIGHT", "ENTER"], delay_ms=150)
     await client.close()
 
