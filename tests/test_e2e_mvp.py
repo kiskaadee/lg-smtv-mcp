@@ -31,6 +31,74 @@ def _extract_error_text(content: list[Any]) -> str:
     return " ".join(item.text for item in content if isinstance(item, TextContent))
 
 
+def _build_online_ssap(
+    tv_ip: str,
+    sent_requests: list[tuple[str, dict[str, Any]]],
+) -> FakeWebSocketTransport:
+    def on_send(raw: str, ws: FakeWebSocketTransport) -> None:
+        msg: dict[str, Any] = json.loads(raw)
+        msg_type = msg.get("type")
+        msg_id = msg.get("id")
+        if msg_type == "register":
+            ws.push_json(
+                {
+                    "type": "registered",
+                    "id": msg_id,
+                    "payload": {"client-key": "e2e-saved-key"},
+                }
+            )
+            return
+        if msg_type == "subscribe":
+            uri = str(msg.get("uri", ""))
+            if uri == "ssap://audio/getStatus":
+                ws.push_json(
+                    {
+                        "type": "response",
+                        "id": msg_id,
+                        "payload": {
+                            "subscribed": True,
+                            "volume": 10,
+                            "mute": False,
+                            "volumeStatus": {"soundOutput": "tv_speaker"},
+                        },
+                    }
+                )
+                return
+            if uri == "ssap://com.webos.applicationManager/getForegroundAppInfo":
+                ws.push_json(
+                    {
+                        "type": "response",
+                        "id": msg_id,
+                        "payload": {
+                            "subscribed": True,
+                            "appId": "com.webos.app.home",
+                        },
+                    }
+                )
+                return
+            ws.push_json({"type": "response", "id": msg_id, "payload": {"subscribed": True}})
+            return
+        if msg_type == "request":
+            uri = str(msg.get("uri", ""))
+            if uri == "ssap://com.webos.service.networkinput/getPointerInputSocket":
+                ws.push_json(
+                    {
+                        "type": "response",
+                        "id": msg_id,
+                        "payload": {
+                            "returnValue": True,
+                            "socketPath": f"ws://{tv_ip}:3000/pointer",
+                        },
+                    }
+                )
+                return
+            payload_in = dict(msg.get("payload") or {})
+            sent_requests.append((uri, payload_in))
+            ws.push_json({"type": "response", "id": msg_id, "payload": {"returnValue": True}})
+
+    return FakeWebSocketTransport(on_send=on_send)
+
+
 async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: Path) -> None:
     tasks_before = set(asyncio.all_tasks())
 
@@ -52,7 +120,10 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
     wol_calls: list[tuple[str, str, int]] = []
     sent_requests: list[tuple[str, dict[str, Any]]] = []
     standby_backoff_entered = asyncio.Event()
+    turn_off_completed = asyncio.Event()
+    post_turn_off_standby_entered = asyncio.Event()
     pointer_ws = FakeWebSocketTransport()
+    online_ssap_connections: list[FakeWebSocketTransport] = []
 
     def fake_send_wol(mac: str, broadcast_addr: str, port: int) -> None:
         nonlocal tv_awake
@@ -60,73 +131,12 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
         tv_awake = True
 
     async def fake_wait_fn(event: asyncio.Event, timeout: float) -> None:
-        standby_backoff_entered.set()
+        if turn_off_completed.is_set():
+            post_turn_off_standby_entered.set()
+        else:
+            standby_backoff_entered.set()
         with suppress(TimeoutError):
             await asyncio.wait_for(event.wait(), timeout=timeout)
-
-    def _build_online_ssap() -> FakeWebSocketTransport:
-        def on_send(raw: str, ws: FakeWebSocketTransport) -> None:
-            msg: dict[str, Any] = json.loads(raw)
-            msg_type = msg.get("type")
-            msg_id = msg.get("id")
-            if msg_type == "register":
-                ws.push_json(
-                    {
-                        "type": "registered",
-                        "id": msg_id,
-                        "payload": {"client-key": "e2e-saved-key"},
-                    }
-                )
-                return
-            if msg_type == "subscribe":
-                uri = str(msg.get("uri", ""))
-                if uri == "ssap://audio/getStatus":
-                    ws.push_json(
-                        {
-                            "type": "response",
-                            "id": msg_id,
-                            "payload": {
-                                "subscribed": True,
-                                "volume": 10,
-                                "mute": False,
-                                "volumeStatus": {"soundOutput": "tv_speaker"},
-                            },
-                        }
-                    )
-                    return
-                if uri == "ssap://com.webos.applicationManager/getForegroundAppInfo":
-                    ws.push_json(
-                        {
-                            "type": "response",
-                            "id": msg_id,
-                            "payload": {
-                                "subscribed": True,
-                                "appId": "com.webos.app.home",
-                            },
-                        }
-                    )
-                    return
-                ws.push_json({"type": "response", "id": msg_id, "payload": {"subscribed": True}})
-                return
-            if msg_type == "request":
-                uri = str(msg.get("uri", ""))
-                if uri == "ssap://com.webos.service.networkinput/getPointerInputSocket":
-                    ws.push_json(
-                        {
-                            "type": "response",
-                            "id": msg_id,
-                            "payload": {
-                                "returnValue": True,
-                                "socketPath": f"ws://{tv_ip}:3000/pointer",
-                            },
-                        }
-                    )
-                    return
-                payload_in = dict(msg.get("payload") or {})
-                sent_requests.append((uri, payload_in))
-                ws.push_json({"type": "response", "id": msg_id, "payload": {"returnValue": True}})
-
-        return FakeWebSocketTransport(on_send=on_send)
 
     async def connect_fn(url: str) -> FakeWebSocketTransport:
         if url.endswith("/pointer"):
@@ -135,7 +145,9 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
             standby_ws = FakeWebSocketTransport()
             standby_ws.push_close(1008, "Try Again Later (EWS)")
             return standby_ws
-        return _build_online_ssap()
+        online_ws = _build_online_ssap(tv_ip, sent_requests)
+        online_ssap_connections.append(online_ws)
+        return online_ws
 
     manager = TvManager(
         config,
@@ -159,8 +171,13 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
             await allow_shutdown.wait()
         return incoming.pop(0)
 
+    startup_error: list[str] = []
+
     async def send(msg: MutableMapping[str, Any]) -> None:
         if msg["type"] == "lifespan.startup.complete":
+            startup_done.set()
+        elif msg["type"] == "lifespan.startup.failed":
+            startup_error.append(str(msg.get("message", "ASGI startup failed")))
             startup_done.set()
 
     async def _run_lifespan() -> None:
@@ -168,7 +185,23 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
 
     lifespan_task: asyncio.Task[None] = asyncio.create_task(_run_lifespan())
     try:
-        await asyncio.wait_for(startup_done.wait(), timeout=2.0)
+        startup_wait_task = asyncio.create_task(startup_done.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {startup_wait_task, lifespan_task},
+                timeout=2.0,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            assert done, "ASGI lifespan startup did not finish within 2.0s"
+            if lifespan_task in done:
+                await lifespan_task
+                raise AssertionError("ASGI lifespan exited before startup completed")
+            assert not startup_error, f"ASGI startup failed: {startup_error[0]}"
+        finally:
+            if not startup_wait_task.done():
+                startup_wait_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await startup_wait_task
         await asyncio.wait_for(standby_backoff_entered.wait(), timeout=2.0)
 
         transport = httpx2.ASGITransport(app=app)
@@ -200,6 +233,7 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
             assert wake_res.is_error is False
             wake_payload = _extract_json_text(wake_res.content)
             assert wake_payload["status"] == "connected"
+            assert isinstance(wake_payload["elapsed_ms"], int) and wake_payload["elapsed_ms"] >= 0
             assert wol_calls == [(tv_mac, "255.255.255.255", 9)]
 
             # 3. get_state: returns connected, fresh subscribed state.
@@ -252,8 +286,22 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
             off_res = await session.call_tool("turn_off", {})
             assert off_res.is_error is False
             assert ("ssap://system/turnOff", {}) in sent_requests
+            turn_off_completed.set()
+            online_ssap_connections[-1].push_close(1008, "Try Again Later (EWS)")
+            await asyncio.wait_for(post_turn_off_standby_entered.wait(), timeout=2.0)
+
+            # 8. Standby (1008) after turn_off: get_state returns cached stale values.
+            stale_state_res = await session.call_tool("get_state", {})
+            assert stale_state_res.is_error is False
+            stale_state_payload = _extract_json_text(stale_state_res.content)
+            assert stale_state_payload["connected"] is False
+            assert stale_state_payload["stale"] is True
+            assert stale_state_payload["volume"] == 10
+            assert stale_state_payload["muted"] is False
+            assert stale_state_payload["sound_output"] == "tv_speaker"
+            assert stale_state_payload["foreground_app"] == "com.webos.app.home"
     finally:
-        # 8. Clean ASGI lifespan shutdown with zero orphaned asyncio tasks.
+        # 9. Clean ASGI lifespan shutdown with zero orphaned asyncio tasks.
         allow_shutdown.set()
         await asyncio.wait_for(lifespan_task, timeout=2.0)
 
