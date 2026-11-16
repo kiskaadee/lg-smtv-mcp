@@ -78,14 +78,14 @@ All runtime code lives under `src/lg_smtv_mcp/`, separating the transport/protoc
 | :--- | :--- |
 | [`src/lg_smtv_mcp/config.py`](../../src/lg_smtv_mcp/config.py) | Frozen Pydantic v2 `TvConfig` (`extra="forbid"`) loaded from env vars / `.env` (`TV_IP`, `TV_MAC`, `WOL_BROADCAST`, `CLIENT_KEY_PATH`, `SSH_KEY_PATH`, `WEBOS_SSH_PASSPHRASE`, `SSH_KNOWN_HOSTS_PATH`, `HOST`, `PORT`, `ALLOWED_HOSTS`, `MCP_BEARER_TOKEN`, `MAX_VOLUME`, `ENABLE_RAW_SSAP`), raising `ConfigError` on invalid operator config. |
 | [`src/lg_smtv_mcp/errors.py`](../../src/lg_smtv_mcp/errors.py) | `ConfigError` for startup/config failures and `TvError(ErrorCode, message)` for runtime TV/tool errors (`TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `SCREENSHOT_UNAVAILABLE`, `LOCK_TIMEOUT`, `WAKE_TIMEOUT`, `COMMAND_FAILED`, `INVALID_ARGUMENT`). |
-| `src/lg_smtv_mcp/tv_core/protocols.py` *(planned)* | Thin Python `Protocol` interfaces (`WebSocketTransport`, `WebSocketConnectFn`, `WebSocketClosedError`, `CaptureTransport`) enabling offline contract tests. |
-| `src/lg_smtv_mcp/tv_core/ssap.py` *(planned)* | `SsapClient`: single background reader task routing frames by `msg["id"]` to `asyncio.Future`s and `subscribe` callbacks; `PERMISSIONS` constant; `register` + `1008` detection; WebSocket keepalive and pending-`Future` cleanup on disconnect. |
-| `src/lg_smtv_mcp/tv_core/pointer.py` *(planned)* | `PointerClient`: acquires `getPointerInputSocket`, normalizes/validates keys, sends plain-text `type:button` frames, and automatically re-acquires the socket if dropped. |
-| `src/lg_smtv_mcp/tv_core/capture.py` *(planned)* | `CaptureClient`: calls `executeOneShot` via `ssap_request_fn` and delegates SFTP I/O (`read_and_remove`, `sweep_temp_files`, `close`) to `CaptureTransport` (persistent `asyncssh` session), tracking `frame_sha256` / `changed_since_last`. |
-| `src/lg_smtv_mcp/tv_core/manager.py` *(planned)* | `TvManager`: single-owner connection loop + state machine, `send_wol` helper, `subscribe` state cache, stepped reconnect backoff, `CaptureClient` teardown on `STANDBY_OFFLINE`, `.client_key.json` reload on `PAIRING_REQUIRED` backoff/`SIGHUP`, and `ui_lock` (`25s` acquire timeout) serializing UI/capture operations. |
-| `src/lg_smtv_mcp/auth.py` *(planned)* | Minimal ASGI Bearer token middleware (`hmac.compare_digest` on `Authorization: Bearer <token>`) wrapping FastMCP's `streamable_http_app()` and `TransportSecuritySettings`. |
-| `src/lg_smtv_mcp/server.py` *(planned)* | FastMCP tool definitions, `ImageContent` formatting, partial-success shaping, `max_volume` enforcement, `ENABLE_RAW_SSAP` gating, and ASGI `lifespan` wiring for `TvManager` + `SIGHUP`. |
-| `src/lg_smtv_mcp/cli.py` *(planned)* | CLI entrypoint supporting `serve` (`streamable-http` with fail-closed `MCP_BEARER_TOKEN` check, or `stdio`) and one-time interactive `pair` (`.client_key.json` + optional `--fetch-ssh-key`). |
+| [`src/lg_smtv_mcp/tv_core/protocols.py`](../../src/lg_smtv_mcp/tv_core/protocols.py) | Thin Python `Protocol` interfaces (`WebSocketTransport`, `WebSocketConnectFn`, `WebSocketClosedError`, `CaptureTransport`, `FrameCapturer`) and frozen result dataclasses enabling offline contract tests. |
+| [`src/lg_smtv_mcp/tv_core/ssap.py`](../../src/lg_smtv_mcp/tv_core/ssap.py) | `SsapClient`: single background reader task routing frames by `msg["id"]` to `asyncio.Future`s and `subscribe` callbacks; `PERMISSIONS` constant; `register` + `1008` detection; WebSocket keepalive and pending-`Future` cleanup on disconnect. |
+| [`src/lg_smtv_mcp/tv_core/pointer.py`](../../src/lg_smtv_mcp/tv_core/pointer.py) | `PointerClient`: acquires `getPointerInputSocket`, normalizes/validates keys, sends plain-text `type:button` frames, and automatically re-acquires the socket if dropped. |
+| `src/lg_smtv_mcp/tv_core/capture.py` *(planned, M2)* | `CaptureClient` (implementing `FrameCapturer`): calls `executeOneShot` via `ssap_request_fn` and delegates SFTP I/O (`read_and_remove`, `sweep_temp_files`, `close`) to `CaptureTransport` (persistent `asyncssh` session), tracking `frame_sha256` / `changed_since_last`. |
+| [`src/lg_smtv_mcp/tv_core/manager.py`](../../src/lg_smtv_mcp/tv_core/manager.py) | `TvManager`: single-owner connection loop + state machine, `send_wol` helper, `subscribe` state cache, stepped reconnect backoff, `FrameCapturer` teardown on `STANDBY_OFFLINE`, `.client_key.json` reload on `PAIRING_REQUIRED` backoff/`SIGHUP`, and `ui_lock` (`25s` acquire timeout) serializing UI/capture operations. |
+| [`src/lg_smtv_mcp/auth.py`](../../src/lg_smtv_mcp/auth.py) | Minimal ASGI Bearer token middleware (`hmac.compare_digest` on `Authorization: Bearer <token>`) wrapping FastMCP's `streamable_http_app()` and `TransportSecuritySettings`. |
+| [`src/lg_smtv_mcp/server.py`](../../src/lg_smtv_mcp/server.py) | FastMCP tool definitions, `ImageContent` formatting, partial-success shaping, `max_volume` enforcement, `ENABLE_RAW_SSAP` gating, and ASGI `lifespan` wiring for `TvManager` + `SIGHUP`. |
+| [`src/lg_smtv_mcp/cli.py`](../../src/lg_smtv_mcp/cli.py) | CLI entrypoint supporting `serve` (`streamable-http` with fail-closed `MCP_BEARER_TOKEN` check, or `stdio`) and one-time interactive `pair` (`.client_key.json` + optional `--fetch-ssh-key`). |
 
 ```mermaid
 classDiagram
@@ -115,6 +115,11 @@ classDiagram
         +send_buttons(keys, delay_ms) int
         +close() void
     }
+    class FrameCapturer {
+        <<interface>>
+        +capture_frame(ssap_request_fn) CaptureResult
+        +close() void
+    }
     class CaptureClient {
         +capture_frame(ssap_request_fn) CaptureResult
         +close() void
@@ -133,7 +138,8 @@ classDiagram
     }
     TvManager --> SsapClient
     TvManager --> PointerClient
-    TvManager --> CaptureClient
+    TvManager --> FrameCapturer
+    CaptureClient ..|> FrameCapturer
     SsapClient --> WebSocketTransport
     PointerClient --> WebSocketTransport
     CaptureClient --> CaptureTransport
@@ -144,7 +150,8 @@ classDiagram
 | `TvManager` | `wake() -> TvStatus`, `get_state() -> TvStateSnapshot`, `send_keys(keys, delay_ms, settle_ms, capture) -> KeysResult`, `type_text(text, send_enter, capture) -> TextResult`, `screenshot() -> CaptureResult`, `launch_app(app_id, content_target, params) -> dict`, `list_apps() -> list[dict]`, `set_volume(level) -> dict`, `set_mute(muted) -> dict`, `list_inputs() -> list[dict]`, `switch_input(input_id) -> dict`, `turn_off() -> dict`, `raw_ssap(uri, payload) -> dict` |
 | `SsapClient` | `async connect_and_register(client_key: str \| None) -> str`, `async request(uri: str, payload: dict \| None) -> dict`, `async subscribe(uri: str, callback: Callable[[dict], None]) -> None`, `async close() -> None` |
 | `PointerClient` | `async send_buttons(keys: list[str], delay_ms: int) -> int`, `async close() -> None` |
-| `CaptureClient` | `async capture_frame(ssap_request_fn: Callable[[str, dict], Awaitable[dict]]) -> CaptureResult`, `async close() -> None` |
+| `FrameCapturer` | `async capture_frame(ssap_request_fn: Callable[[str, dict], Awaitable[dict]]) -> CaptureResult`, `async close() -> None` |
+| `CaptureClient` | Implements `FrameCapturer` *(planned, M2)* |
 | `WebSocketTransport` | `async send(data: str) -> None`, `async recv() -> str`, `async close() -> None` (raises `WebSocketClosedError(code, reason)` on close); `WebSocketConnectFn = Callable[[str], Awaitable[WebSocketTransport]]` |
 | `CaptureTransport` | `async read_and_remove(remote_path: str, timeout: float, cleanup_grace: float) -> bytes`, `async sweep_temp_files(prefix: str) -> None`, `async close() -> None` |
 
@@ -295,7 +302,7 @@ Implementation proceeds in three incremental phases, each ending with its listed
 #### 6. `src/lg_smtv_mcp/tv_core/protocols.py` (Create)
 
 *   **Type / Scope:** Transport abstraction boundaries (`Protocol`s) and result schemas.
-*   **Proposed Changes:** Define `WebSocketClosedError(code: int, reason: str)`, `WebSocketTransport` (`send`, `recv`, `close`), `WebSocketConnectFn = Callable[[str], Awaitable[WebSocketTransport]]`, and `CaptureTransport` (`read_and_remove`, `sweep_temp_files`, `close`). Define frozen result dataclasses/TypedDicts: `TvStatus(status: Literal["connected", "already_connected"], elapsed_ms: int)`, `TvStateSnapshot(connected: bool, stale: bool, volume: int | None, muted: bool | None, sound_output: str | None, foreground_app: str | None, last_updated: float | None)`, `KeysResult(keys_sent: bool, count: int, frame_sha256: str | None, changed_since_last: bool | None, size_bytes: int | None, capture_error: str | None)`, `TextResult(text_sent: bool, enter_sent: bool, frame_sha256: str | None, changed_since_last: bool | None, size_bytes: int | None, capture_error: str | None)`, and `CaptureResult(image_bytes: bytes, frame_sha256: str, changed_since_last: bool, size_bytes: int)`.
+*   **Proposed Changes:** Define `WebSocketClosedError(code: int, reason: str)`, `WebSocketTransport` (`send`, `recv`, `close`), `WebSocketConnectFn = Callable[[str], Awaitable[WebSocketTransport]]`, `CaptureTransport` (`read_and_remove`, `sweep_temp_files`, `close`), and `FrameCapturer` (`capture_frame`, `close`). Define frozen result dataclasses: `TvStatus(status: Literal["connected", "already_connected"], elapsed_ms: int)`, `TvStateSnapshot(connected: bool, stale: bool, volume: int | None, muted: bool | None, sound_output: str | None, foreground_app: str | None, last_updated: float | None)`, `KeysResult(keys_sent: bool, count: int, frame_sha256: str | None = None, changed_since_last: bool | None = None, size_bytes: int | None = None, capture_error: str | None = None, image_bytes: bytes | None = None)`, `TextResult(text_sent: bool, enter_sent: bool, frame_sha256: str | None = None, changed_since_last: bool | None = None, size_bytes: int | None = None, capture_error: str | None = None, image_bytes: bytes | None = None)`, and `CaptureResult(image_bytes: bytes, frame_sha256: str, changed_since_last: bool, size_bytes: int)`.
 
 #### 7. `src/lg_smtv_mcp/tv_core/ssap.py` (Create)
 

@@ -60,8 +60,8 @@ Implementation is tracked on the [Project Pipeline](https://gitea.roadtotech.me/
 
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
-| **M1** | Core config, `tv_core` engine, FastMCP tools, Bearer auth, `pair`/`serve` CLI, E2E verification | Complete (`#1`–`#3` merged on `main`; `#4` E2E & docs) |
-| **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, extended surface | Planned (`#5`) |
+| **M1** | Core config, `tv_core` engine, FastMCP tools, Bearer auth, `pair`/`serve` CLI, E2E verification | Complete (`#1`–`#4` merged on `main`) |
+| **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, E2E test hardening | Planned (`#5`, `#11`) |
 
 Implemented in [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) and exposed via [`server.py`](src/lg_smtv_mcp/server.py):
 - Persistent SSAP multiplexing and `subscribe`-backed state snapshots (`get_state`: `volume`, `muted`, `sound_output`, `foreground_app`)
@@ -202,6 +202,9 @@ nix flake check
 
 ## Documentation
 
+- [Architecture](ARCHITECTURE.md) — Canonical present-state system topology, components, and boundaries
+- [Roadmap](ROADMAP.md) — Completed M1 milestones and planned M2 delivery trajectory
+- [Decision Records](docs/adr/) — MADR records for core architectural choices (`0001`–`0005`)
 - [Architecture & Design RFC](docs/designs/lg-smtv-mcp.md) — Component contracts, state machine, error taxonomy, and implementation plan
 - [Verified Capabilities](docs/poc/capabilities.md) — Empirical SSAP, DIAL, deep-link, and Developer Mode findings
 - [Crunchyroll E2E Experiment](docs/poc/crunchyroll-e2e-experiment.md) — Initial vision-guided navigation experiment and latency measurements
