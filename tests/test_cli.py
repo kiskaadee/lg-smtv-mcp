@@ -29,7 +29,6 @@ def _make_config(
     )
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: cli not yet implemented")
 @pytest.mark.parametrize("bad_token", [None, "", "   "])
 def test_cli_serve_http_fails_closed_when_bearer_token_missing_or_blank(
     tmp_path: Path,
@@ -52,7 +51,6 @@ def test_cli_serve_http_fails_closed_when_bearer_token_missing_or_blank(
     assert called is False
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: cli not yet implemented")
 def test_cli_serve_http_runs_uvicorn_with_configured_host_and_port(tmp_path: Path) -> None:
     captured: list[tuple[ASGIApp, str, int]] = []
 
@@ -72,7 +70,6 @@ def test_cli_serve_http_runs_uvicorn_with_configured_host_and_port(tmp_path: Pat
     assert port == 8765
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: cli not yet implemented")
 def test_cli_serve_stdio_delegates_to_stdio_runner_without_bearer_token(tmp_path: Path) -> None:
     ran: list[MCPServer[Any]] = []
 
@@ -90,7 +87,6 @@ def test_cli_serve_stdio_delegates_to_stdio_runner_without_bearer_token(tmp_path
     assert isinstance(ran[0], MCPServer)
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: cli not yet implemented")
 def test_cli_pair_merges_existing_client_keys_and_writes_0600(tmp_path: Path) -> None:
     key_file = tmp_path / ".client_key.json"
     key_file.write_text(json.dumps({"192.0.2.10": "old-key"}), encoding="utf-8")
@@ -126,7 +122,6 @@ def test_cli_pair_merges_existing_client_keys_and_writes_0600(tmp_path: Path) ->
     assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: cli not yet implemented")
 def test_cli_pair_fetch_ssh_key_saves_key_with_0600_permissions(tmp_path: Path) -> None:
     ssh_dest = tmp_path / "webos_rsa"
     fetched_urls: list[str] = []
@@ -162,7 +157,6 @@ def test_cli_pair_fetch_ssh_key_saves_key_with_0600_permissions(tmp_path: Path) 
     assert stat.S_IMODE(ssh_dest.stat().st_mode) == 0o600
 
 
-@pytest.mark.xfail(strict=True, reason="Red phase: cli not yet implemented")
 def test_cli_pair_fetch_ssh_key_failure_preserves_client_key_and_exits_nonzero(
     tmp_path: Path,
 ) -> None:
