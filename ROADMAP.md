@@ -6,7 +6,8 @@
 
 ## Near Term (Milestone M2)
 
-- **Developer Mode SFTP Capture & Extended Surface ([#5](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/5)):** Implement `tv_core/capture.py` (`CaptureClient` + `AsyncSshCaptureTransport` behind `FrameCapturer` / `CaptureTransport`) with `6s` shared deadline, `finally: sftp.remove()` cleanup, `/tmp/lg_smtv_cap_*.jpg` reconnect sweep, `frame_sha256` / `changed_since_last` tracking, and `deploy/lg-smtv-mcp.service` systemd unit.
+- **Developer Mode SFTP Capture ([#12](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/12)):** Implement `tv_core/capture.py` (`CaptureClient` + `AsyncSshCaptureTransport` behind `FrameCapturer` / `CaptureTransport`) with `6s` shared deadline, shielded `finally: sftp.remove()` cleanup, `/tmp/lg_smtv_cap_*.jpg` reconnect sweep, `frame_sha256` / `changed_since_last` tracking, and default `server.py` wiring.
+- **Systemd Unit & Deployment Docs ([#13](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/13)):** Add `deploy/lg-smtv-mcp.service` template and document systemd + Developer Mode SSH setup in `README.md`.
 - **E2E Harness & Standby Parity Hardening ([#11](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/11)):** Address PR `#10` review follow-ups in [`tests/test_e2e_mvp.py`](tests/test_e2e_mvp.py) (`_build_online_ssap` extraction, fast-fail ASGI lifespan startup errors, `elapsed_ms` contract check, and post-`turn_off()` `1008` -> `get_state` stale verification).
 
 ## Medium Term
