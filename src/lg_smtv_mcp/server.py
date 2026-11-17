@@ -16,7 +16,7 @@ from mcp.types import ImageContent, TextContent
 from lg_smtv_mcp.auth import ASGIApp, build_transport_security_settings, wrap_bearer_auth
 from lg_smtv_mcp.config import TvConfig, require_bearer_token
 from lg_smtv_mcp.errors import ConfigError, TvError
-from lg_smtv_mcp.tv_core import TvManager
+from lg_smtv_mcp.tv_core import AsyncSshCaptureTransport, CaptureClient, TvManager
 
 
 async def _run_tv_call[T](fn: Callable[[], Awaitable[T]]) -> T:
@@ -157,7 +157,11 @@ def _register_tools(server: MCPServer, tv_manager: TvManager, config: TvConfig) 
 
 def create_mcp_server(config: TvConfig, manager: TvManager | None = None) -> MCPServer:
     """Create and configure the MCPServer instance with TV tools and lifespan."""
-    tv_manager = manager if manager is not None else TvManager(config)
+    tv_manager = (
+        manager
+        if manager is not None
+        else TvManager(config, capture_client=CaptureClient(AsyncSshCaptureTransport(config)))
+    )
 
     @asynccontextmanager
     async def _lifespan(_server: MCPServer[None]) -> AsyncGenerator[None]:

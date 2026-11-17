@@ -1,5 +1,6 @@
 """Core LG webOS TV transport, protocol, and state machine package."""
 
+from lg_smtv_mcp.tv_core.capture import AsyncSshCaptureTransport, CaptureClient
 from lg_smtv_mcp.tv_core.manager import ConnectionState, TvManager, TvState, send_wol
 from lg_smtv_mcp.tv_core.pointer import BUTTON_ALLOWLIST, PointerClient, normalize_button_keys
 from lg_smtv_mcp.tv_core.protocols import (
@@ -22,7 +23,9 @@ from lg_smtv_mcp.tv_core.ssap import (
 )
 
 __all__ = [
+    "AsyncSshCaptureTransport",
     "BUTTON_ALLOWLIST",
+    "CaptureClient",
     "CaptureResult",
     "CaptureTransport",
     "ConnectionState",

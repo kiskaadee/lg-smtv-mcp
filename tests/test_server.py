@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import asyncssh
 import httpx
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
@@ -457,3 +458,91 @@ async def test_server_http_app_allows_authenticated_mcp_initialize_request(
     finally:
         allow_shutdown.set()
         await asyncio.wait_for(lifespan_task, timeout=2.0)
+
+
+async def test_server_create_mcp_server_wires_default_capture_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import lg_smtv_mcp.server as server_mod
+    from lg_smtv_mcp.tv_core.capture import CaptureClient
+
+    config = _make_config(tmp_path)
+    captured: dict[str, Any] = {}
+    remote_files: dict[str, bytes] = {}
+    removed_paths: list[str] = []
+    connect_calls: list[dict[str, Any]] = []
+
+    class DummyManager:
+        async def start(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class FakeSftp:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def listdir(self, path: str) -> list[str]:
+            _ = path
+            return []
+
+        async def read(self, path: str) -> bytes:
+            return remote_files[path]
+
+        async def remove(self, path: str) -> None:
+            removed_paths.append(path)
+            remote_files.pop(path, None)
+
+        async def exit(self) -> None:
+            self.closed = True
+
+    sftp_sessions: list[FakeSftp] = []
+
+    class FakeSshConnection:
+        async def start_sftp_client(self) -> FakeSftp:
+            sftp = FakeSftp()
+            sftp_sessions.append(sftp)
+            return sftp
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    def fake_tv_manager(cfg: Any, **kwargs: Any) -> DummyManager:
+        captured["config"] = cfg
+        captured["kwargs"] = kwargs
+        return DummyManager()
+
+    async def fake_connect(**kwargs: Any) -> FakeSshConnection:
+        connect_calls.append(kwargs)
+        return FakeSshConnection()
+
+    monkeypatch.setattr(server_mod, "TvManager", fake_tv_manager)
+    monkeypatch.setattr(asyncssh, "connect", fake_connect)
+    server_mod.create_mcp_server(config)
+
+    assert captured["config"] is config
+    assert "capture_client" in captured["kwargs"]
+    capture_client = captured["kwargs"]["capture_client"]
+    assert isinstance(capture_client, CaptureClient)
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        assert uri == "ssap://com.webos.service.capture/executeOneShot"
+        remote_files[payload["path"]] = _TEST_JPEG
+        return {"returnValue": True}
+
+    try:
+        result = await capture_client.capture_frame(ssap_request)
+    finally:
+        await capture_client.close()
+
+    assert result.image_bytes == _TEST_JPEG
+    assert len(connect_calls) == 1
+    assert connect_calls[0]["host"] == config.tv_ip
+    assert connect_calls[0]["port"] == 9922
+    assert removed_paths == ["/tmp/lg_smtv_cap_1.jpg"]
+    assert len(sftp_sessions) == 1
+    assert sftp_sessions[0].closed is True
