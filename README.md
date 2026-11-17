@@ -177,7 +177,7 @@ The repository includes a unit template at [`deploy/lg-smtv-mcp.service`](deploy
    sudoedit /etc/systemd/system/lg-smtv-mcp.service
    ```
 
-3. Check where Nix is installed with `command -v nix`. System services do not inherit an interactive shell's profile, so edit the unit's `PATH` assignment to include the directory containing `nix` and the standard system binary directories.
+3. Check where Nix is installed with `command -v nix`. Replace `<NixBinDir>` in the unit's `PATH` with the directory containing that `nix` executable, keeping the standard system binary directories in the value. The unit starts `/usr/bin/env` by its absolute path; `env` then finds `nix` using the service's configured `PATH`.
 4. Reload systemd and start the service:
 
    ```bash
