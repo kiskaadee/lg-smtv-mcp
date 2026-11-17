@@ -3,7 +3,7 @@
 *   **Author:** kiskaadee
 *   **Status:** Approved
 *   **Date:** 2026-11-15
-*   **Last reconciled:** 2026-11-16 (M2 `#12` / PR [#15](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/15) merged)
+*   **Last reconciled:** 2026-11-17 (M2 fully delivered: `#13` / PR [#16](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/16) merged; Milestone M2 closed)
 
 --------------------------------------------------------------------------------
 
