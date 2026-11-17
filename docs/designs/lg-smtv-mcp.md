@@ -267,7 +267,7 @@ All tools return structured JSON payloads (plus inline MCP `ImageContent` when `
 
 ## Detailed Implementation Plan
 
-Milestone M1 foundations (`#1`–`#4`) and the M2 capture/E2E slices (`#11`, `#12`) are implemented, verified, and merged on `main`. The completed baselines are summarized for reference below; the active plan specifies the remaining Milestone M2 deployment slice (`#13`).
+Milestone M1 foundations (`#1`–`#4`) and all Milestone M2 slices (`#11`, `#12`, `#13`) are implemented, verified, and merged on `main`. The completed baselines are summarized for reference below. Follow-up `systemd` unit sandboxing hardening is tracked separately in [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17).
 
 ### Completed Milestone M1 Baseline (`#1`–`#4`, Merged on `main`)
 
@@ -278,7 +278,7 @@ Milestone M1 foundations (`#1`–`#4`) and the M2 capture/E2E slices (`#11`, `#1
 
 ---
 
-### Completed Milestone M2 Slices (`#11`, `#12` — Merged on `main`)
+### Completed Milestone M2 Slices (`#11`, `#12`, `#13` — Merged on `main`)
 
 Delivered by `#12` (PR [#15](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/15)) and `#11` (PR [#14](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/14)). The contracts below match `main` as merged, including the PR `#15` review remediation (CR-01..CR-11).
 
@@ -328,21 +328,15 @@ Delivered by `#12` (PR [#15](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/p
     *   Asserted `isinstance(wake_payload["elapsed_ms"], int) and wake_payload["elapsed_ms"] >= 0` on `tv_wake`.
     *   After `turn_off()`, simulated the TV closing the SSAP WebSocket with `1008` and re-queried `get_state` to verify `connected: false, stale: true` with cached state retained.
 
-*   **M2 Delivery Checkpoint:** `nix develop --command bash -c "ruff check . && ruff format --check . && pyright && pytest"` and `nix flake check` passed for `#11` and `#12`.
+#### 5. `deploy/lg-smtv-mcp.service` and `README.md` (Completed — Issue `#13`, PR [#16](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/16))
 
----
+*   **Type / Scope:** Systemd unit template and operator deployment documentation.
+*   **Delivered Changes:**
+    *   Created `deploy/lg-smtv-mcp.service` template invoking `nix develop --command python -m lg_smtv_mcp serve` with `<User>`, `<WorkingDirectory>`, `EnvironmentFile`, `Restart=on-failure`, and `PATH` containing `<NixBinDir>`.
+    *   Updated `README.md` with `systemd` setup instructions, Developer Mode pairing workflow (`python -m lg_smtv_mcp pair --fetch-ssh-key`), DNS-rebinding host configuration (`HOST` + `ALLOWED_HOSTS`), and live-TV operator smoke checklist items.
+    *   Follow-up unit sandboxing hardening is tracked separately in issue [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17).
 
-### Active Milestone M2 Plan: Systemd Deployment (`#13`)
-
-#### 1. `deploy/lg-smtv-mcp.service` and `README.md` (Create / Modify — Issue `#13`)
-
-*   **Type / Scope:** Systemd unit template and operator documentation.
-*   **Proposed Changes:**
-    *   Create `deploy/lg-smtv-mcp.service` with `<User>`, `<WorkingDirectory>`, `EnvironmentFile`, `After=network-online.target`, `Wants=network-online.target`, and `Restart=on-failure`, invoking `nix develop --command python -m lg_smtv_mcp serve`.
-    *   Update `README.md` with `systemd` deployment steps (including ensuring `nix` is on `systemd`'s `PATH`), Developer Mode SSH setup (`pair --fetch-ssh-key`, `:9922` session timer behavior, `SSH_KNOWN_HOSTS_PATH`), and a live-TV `screenshot` / `keys(..., capture=True)` smoke checklist item.
-    *   A follow-up issue (`#17`) tracks tightening the unit's sandboxing directives after this baseline template lands.
-
-*   **M2 Completion Checkpoint:** `nix develop --command bash -c "ruff check . && ruff format --check . && pyright && pytest"` and `nix flake check`.
+*   **M2 Delivery Checkpoint:** All checks (`ruff`, `pyright`, `pytest`, `nix flake check`) passed; PR #16 merged on `main`.
 
 ### Verification Plan
 

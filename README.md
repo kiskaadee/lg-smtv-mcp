@@ -140,12 +140,14 @@ MAX_VOLUME=40
 
 ## Running the MVP Server (`pair` & `serve`)
 
+> **Note:** Inside `nix develop`, run commands using `python -m lg_smtv_mcp <subcommand>` (or `nix run . -- <subcommand>`), as the devShell provisions the Python environment directly rather than installing package console scripts to `PATH`.
+
 1. **Pair with the TV (one-time per TV):** Ensure the TV is powered on with *LG Connect Apps* enabled, then run:
 
    ```bash
-   lg-smtv-mcp pair
+   python -m lg_smtv_mcp pair
    # Optional: override IP or also fetch Developer Mode SSH key
-   lg-smtv-mcp pair --ip <TV_IP>
+   python -m lg_smtv_mcp pair --ip <TV_IP>
    ```
 
    Accept the pairing prompt on the TV screen. The client key is saved atomically with `0600` permissions to `CLIENT_KEY_PATH` (default `.client_key.json`).
@@ -155,10 +157,10 @@ MAX_VOLUME=40
    ```bash
    # Default: persistent Streamable HTTP daemon at http://<HOST>:<PORT>/mcp
    # Requires Authorization: Bearer <MCP_BEARER_TOKEN>
-   lg-smtv-mcp serve
+   python -m lg_smtv_mcp serve
 
    # Local testing over stdio (no HTTP Bearer token required)
-   lg-smtv-mcp serve --transport stdio
+   python -m lg_smtv_mcp serve --transport stdio
    ```
 
    If you re-pair while `serve` is running, send `SIGHUP` to reload `.client_key.json` without restarting the daemon.
@@ -203,9 +205,9 @@ On a trusted home LAN, SSH host-key checking is disabled by default because the 
 
 ## Operator Live-TV E2E Smoke Test Checklist
 
-Automated tests run strictly offline. After deploying or updating on a host on the same LAN as the TV, run this manual smoke checklist from an MCP client connected to `lg-smtv-mcp serve`:
+Automated tests run strictly offline. After deploying or updating on a host on the same LAN as the TV, run this manual smoke checklist from an MCP client connected to `python -m lg_smtv_mcp serve`:
 
-- [ ] **`pair`**: Run `lg-smtv-mcp pair`, accept the on-screen TV prompt, and confirm `CLIENT_KEY_PATH` (`.client_key.json`) exists with `0600` permissions and an entry for `<TV_IP>`.
+- [ ] **`pair`**: Run `python -m lg_smtv_mcp pair`, accept the on-screen TV prompt, and confirm `CLIENT_KEY_PATH` (`.client_key.json`) exists with `0600` permissions and an entry for `<TV_IP>`.
 - [ ] **`tv_wake`**: With the TV in standby, verify a mutating tool (`launch`) fails fast with `TV_OFFLINE_STANDBY` (no implicit WoL), then call `tv_wake` and confirm the TV powers on and returns `status: "connected"`.
 - [ ] **`get_state`**: Call `get_state` and confirm `connected: true`, `stale: false`, and live `volume`, `muted`, `sound_output`, and `foreground_app` values.
 - [ ] **`launch`**: Call `launch` (e.g., `app_id="youtube.leanback.v4"` with an optional `content_target`) and confirm the app opens on screen.
