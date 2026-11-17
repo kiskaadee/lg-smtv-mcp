@@ -1,0 +1,17 @@
+[Unit]
+Description=LG webOS Smart TV MCP server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=<User>
+WorkingDirectory=<WorkingDirectory>
+EnvironmentFile=<WorkingDirectory>/.env
+Environment="PATH=/run/current-system/sw/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+ExecStart=nix develop --command python -m lg_smtv_mcp serve
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
