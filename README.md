@@ -187,14 +187,14 @@ The repository includes a unit template at [`deploy/lg-smtv-mcp.service`](deploy
    sudo journalctl -u lg-smtv-mcp.service
    ```
 
-The HTTP server binds to `127.0.0.1` by default and requires `MCP_BEARER_TOKEN`. Use a trusted reverse proxy or VPN if clients need remote access.
+The HTTP server binds to `127.0.0.1` by default and requires `MCP_BEARER_TOKEN`. Use a trusted reverse proxy or VPN if clients need remote access. When exposing the server remotely, set **both** `HOST=0.0.0.0` (or the LAN bind address) **and** `ALLOWED_HOSTS=<proxy-or-vpn-hostname>` in `.env`; the DNS-rebinding check in `auth.py` rejects any request whose `Host` header is not in the allowlist.
 
 ### Developer Mode SSH Capture Setup
 
 Enable Developer Mode and the TV's Key Server in the Developer Mode app. Run pairing from the configured checkout as the same service user so the client key and SSH key are saved where the service can read them:
 
 ```bash
-lg-smtv-mcp pair --fetch-ssh-key
+python -m lg_smtv_mcp pair --fetch-ssh-key
 ```
 
 Accept the on-screen pairing prompt. The command fetches the SSH key from the TV and saves it with mode `0600` (default path `.webos_rsa`); set `SSH_KEY_PATH` in `.env` to that path. Developer Mode provides SSH/SFTP on port `9922`. Its on-TV countdown timer eventually expires and disables Developer Mode, so screenshot capture then returns `SCREENSHOT_UNAVAILABLE` until Developer Mode is enabled again. Other SSAP tools remain available.
