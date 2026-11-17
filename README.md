@@ -6,8 +6,8 @@ A Python Model Context Protocol (MCP) server for persistent, local-network contr
 
 The server is deliberately **LLM-free**: it exposes bounded, deterministic operations so external AI agents (such as Antigravity, Claude, or a vision-guided decision loop) can reason over UI state and control the television without embedding model APIs into the daemon.
 
-> **Status: M2 in progress — capture delivered.**
-> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)), and Developer Mode SFTP screenshot capture ([`capture.py`](src/lg_smtv_mcp/tv_core/capture.py)) are implemented and tested. The remaining M2 work is the `systemd` unit and deployment documentation ([#13](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/13)).
+> **Status: M2 delivered — capture, E2E hardening, and `systemd` deployment.**
+> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)), and Developer Mode SFTP screenshot capture ([`capture.py`](src/lg_smtv_mcp/tv_core/capture.py)) are implemented and tested. Milestone M2 is delivered; `systemd` unit sandboxing hardening is tracked separately in [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17).
 
 ---
 
@@ -61,7 +61,7 @@ Implementation is tracked on the [Project Pipeline](https://gitea.roadtotech.me/
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
 | **M1** | Core config, `tv_core` engine, FastMCP tools, Bearer auth, `pair`/`serve` CLI, E2E verification | Complete (`#1`–`#4` merged on `main`) |
-| **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, E2E test hardening | In progress — capture (`#12`) and E2E hardening (`#11`) merged; systemd deployment (`#13`) open |
+| **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, E2E test hardening | Delivered — capture (`#12`), E2E hardening (`#11`), and systemd deployment (`#13`); unit sandboxing hardening tracked in `#17` |
 
 Implemented in [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) and exposed via [`server.py`](src/lg_smtv_mcp/server.py):
 - Persistent SSAP multiplexing and `subscribe`-backed state snapshots (`get_state`: `volume`, `muted`, `sound_output`, `foreground_app`)
@@ -165,6 +165,42 @@ MAX_VOLUME=40
 
 ---
 
+## systemd Deployment
+
+The repository includes a unit template at [`deploy/lg-smtv-mcp.service`](deploy/lg-smtv-mcp.service). It runs the server from the project checkout so `nix develop` can use the repository flake.
+
+1. Prepare the host on the same trusted network as the TV. Install Nix with Flakes enabled, clone this repository to a stable directory, copy `.env.example` to `.env`, and set the required TV coordinates and `MCP_BEARER_TOKEN`. Keep `.env` readable by the service user and private (for example, mode `0600`).
+2. Copy the template into systemd's unit directory, then replace `<User>` with the account that will run the server and `<WorkingDirectory>` with the absolute repository checkout path. Set `EnvironmentFile` to the `.env` file used for that checkout:
+
+   ```bash
+   sudo cp deploy/lg-smtv-mcp.service /etc/systemd/system/lg-smtv-mcp.service
+   sudoedit /etc/systemd/system/lg-smtv-mcp.service
+   ```
+
+3. Check where Nix is installed with `command -v nix`. Replace `<NixBinDir>` in the unit's `PATH` with the directory containing that `nix` executable, keeping the standard system binary directories in the value. The unit starts `/usr/bin/env` by its absolute path; `env` then finds `nix` using the service's configured `PATH`.
+4. Reload systemd and start the service:
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now lg-smtv-mcp.service
+   sudo systemctl status lg-smtv-mcp.service
+   sudo journalctl -u lg-smtv-mcp.service
+   ```
+
+The HTTP server binds to `127.0.0.1` by default and requires `MCP_BEARER_TOKEN`. Use a trusted reverse proxy or VPN if clients need remote access. When exposing the server remotely, set **both** `HOST=0.0.0.0` (or the LAN bind address) **and** `ALLOWED_HOSTS=<proxy-or-vpn-hostname>` in `.env`; the DNS-rebinding check in `auth.py` rejects any request whose `Host` header is not in the allowlist.
+
+### Developer Mode SSH Capture Setup
+
+Enable Developer Mode and the TV's Key Server in the Developer Mode app. Run pairing from the configured checkout as the same service user so the client key and SSH key are saved where the service can read them:
+
+```bash
+python -m lg_smtv_mcp pair --fetch-ssh-key
+```
+
+Accept the on-screen pairing prompt. The command fetches the SSH key from the TV and saves it with mode `0600` (default path `.webos_rsa`); set `SSH_KEY_PATH` in `.env` to that path. Developer Mode provides SSH/SFTP on port `9922`. Its on-TV countdown timer eventually expires and disables Developer Mode, so screenshot capture then returns `SCREENSHOT_UNAVAILABLE` until Developer Mode is enabled again. Other SSAP tools remain available.
+
+On a trusted home LAN, SSH host-key checking is disabled by default because the TV regenerates its SSH host key when Developer Mode is reinitialized. To pin the host key instead, set `SSH_KNOWN_HOSTS_PATH` to a `known_hosts` file and update it after Developer Mode renewals.
+
 ## Operator Live-TV E2E Smoke Test Checklist
 
 Automated tests run strictly offline. After deploying or updating on a host on the same LAN as the TV, run this manual smoke checklist from an MCP client connected to `lg-smtv-mcp serve`:
@@ -174,6 +210,8 @@ Automated tests run strictly offline. After deploying or updating on a host on t
 - [ ] **`get_state`**: Call `get_state` and confirm `connected: true`, `stale: false`, and live `volume`, `muted`, `sound_output`, and `foreground_app` values.
 - [ ] **`launch`**: Call `launch` (e.g., `app_id="youtube.leanback.v4"` with an optional `content_target`) and confirm the app opens on screen.
 - [ ] **`keys`**: Call `keys` with a small batch (e.g., `["DOWN", "ENTER"]`) and confirm D-pad navigation registers on the TV.
+- [ ] **`screenshot`**: With Developer Mode active and SSH configured, call `screenshot` and confirm the response includes JPEG image content and capture metadata.
+- [ ] **`keys(..., capture=True)`**: Send a small key batch with capture enabled; confirm the response reports successful key delivery and includes the screenshot. If the Developer Mode timer has expired, confirm the response reports the capture failure while preserving `keys_sent: true`.
 - [ ] **`set_volume`**: Call `set_volume` with a safe level within `MAX_VOLUME` (e.g., `15`) and confirm the TV volume updates.
 - [ ] **`turn_off`**: Call `turn_off` and confirm the TV enters standby and subsequent `get_state` reports `connected: false, stale: true`.
 
