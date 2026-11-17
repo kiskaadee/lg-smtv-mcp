@@ -54,12 +54,12 @@ class AsyncSshCaptureTransport:
                     if asyncio.iscoroutine(res):
                         await res
 
-    async def _ensure_sftp(self) -> Any:
+    async def _ensure_sftp(self, exclude: str | None = None) -> Any:
         if self._sftp is not None:
             return self._sftp
 
         config = self._config
-        self._conn = await self._connect_fn(
+        conn = await self._connect_fn(
             host=config.tv_ip,
             port=9922,
             username="prisoner",
@@ -74,9 +74,22 @@ class AsyncSshCaptureTransport:
             client_keys=[str(config.ssh_key_path)] if config.ssh_key_path is not None else None,
             passphrase=config.webos_ssh_passphrase,
         )
-        self._sftp = await self._conn.start_sftp_client()
+        try:
+            sftp = await conn.start_sftp_client()
+        except BaseException:
+            conn.close()
+            with suppress(Exception):
+                wait_closed = getattr(conn, "wait_closed", None)
+                if callable(wait_closed):
+                    res = wait_closed()
+                    if asyncio.iscoroutine(res):
+                        await res
+            raise
+
+        self._conn = conn
+        self._sftp = sftp
         with suppress(Exception):
-            await self.sweep_temp_files("/tmp/lg_smtv_cap_")
+            await self.sweep_temp_files("/tmp/lg_smtv_cap_", exclude=exclude)
         return self._sftp
 
     async def read_and_remove(
@@ -85,38 +98,49 @@ class AsyncSshCaptureTransport:
         timeout: float = 6.0,
         cleanup_grace: float = 1.5,
     ) -> bytes:
-        _ = timeout  # timeout budget is enforced by CaptureClient around the full operation
+        sftp = None
         try:
-            sftp = await self._ensure_sftp()
-            try:
+            async with asyncio.timeout(timeout):
+                sftp = await self._ensure_sftp(exclude=remote_path)
                 data = await sftp.read(remote_path)
-                if not isinstance(data, (bytes, bytearray)):
-                    data = bytes(data)
-                else:
-                    data = bytes(data)
-            finally:
-                with suppress(Exception):
-                    await asyncio.wait_for(
-                        asyncio.shield(sftp.remove(remote_path)),
-                        timeout=cleanup_grace,
-                    )
-            return data
+                return bytes(data)
         except asyncssh.Error, OSError:
             await self._close_handles()
             raise
+        finally:
+            if sftp is not None:
+                remove_task = asyncio.create_task(sftp.remove(remote_path))
 
-    async def sweep_temp_files(self, prefix: str = "/tmp/lg_smtv_cap_") -> None:
+                def _consume_exception(task: asyncio.Task[Any]) -> None:
+                    with suppress(Exception):
+                        _ = task.exception()
+
+                remove_task.add_done_callback(_consume_exception)
+                with suppress(Exception):
+                    await asyncio.wait_for(
+                        asyncio.shield(remove_task),
+                        timeout=cleanup_grace,
+                    )
+
+    async def sweep_temp_files(
+        self,
+        prefix: str = "/tmp/lg_smtv_cap_",
+        exclude: str | None = None,
+    ) -> None:
         sftp = self._sftp
         if sftp is None:
             return
         directory = os.path.dirname(prefix) or "/tmp"
         name_prefix = os.path.basename(prefix)
+        exclude_name = os.path.basename(exclude) if exclude else None
         try:
             entries = await sftp.listdir(directory)
         except Exception:
             return
         for entry in entries:
             if not isinstance(entry, str) or not entry.startswith(name_prefix):
+                continue
+            if exclude_name is not None and entry == exclude_name:
                 continue
             remote_path = f"{directory.rstrip('/')}/{entry}"
             with suppress(Exception):
@@ -150,11 +174,6 @@ class CaptureClient:
                 except TvError as exc:
                     if exc.code in (ErrorCode.TV_OFFLINE_STANDBY, ErrorCode.PAIRING_REQUIRED):
                         raise
-                    if exc.code is ErrorCode.COMMAND_FAILED:
-                        raise TvError(
-                            ErrorCode.SCREENSHOT_UNAVAILABLE,
-                            f"executeOneShot failed: {exc.message}",
-                        ) from exc
                     raise TvError(
                         ErrorCode.SCREENSHOT_UNAVAILABLE,
                         f"executeOneShot failed: {exc.message}",

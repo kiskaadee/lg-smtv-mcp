@@ -17,13 +17,13 @@ class FakeSftpClient:
         self,
         *,
         files: dict[str, bytes] | None = None,
-        list_names: list[str] | None = None,
+        extra_names: list[str] | None = None,
         read_error: Exception | None = None,
         remove_delay: float = 0.0,
         remove_error: Exception | None = None,
     ) -> None:
         self.files = dict(files or {})
-        self.list_names = list(list_names or [])
+        self.extra_names = list(extra_names or [])
         self.read_error = read_error
         self.remove_delay = remove_delay
         self.remove_error = remove_error
@@ -46,12 +46,11 @@ class FakeSftpClient:
         if self.remove_error is not None:
             raise self.remove_error
         self.files.pop(path, None)
-        if path in self.list_names:
-            self.list_names.remove(path)
 
     async def listdir(self, path: str) -> list[str]:
         _ = path
-        return list(self.list_names)
+        names = {Path(p).name for p in self.files} | set(self.extra_names)
+        return sorted(names)
 
     async def exit(self) -> None:
         self.closed = True
@@ -74,6 +73,48 @@ class FakeSshConnection:
         return None
 
 
+class FakeCaptureTransport:
+    def __init__(
+        self,
+        *,
+        image_bytes: bytes = b"default-image",
+        read_error: Exception | None = None,
+        block_read: bool = False,
+    ) -> None:
+        self.image_bytes = image_bytes
+        self.read_error = read_error
+        self.block_read = block_read
+        self.read_calls: list[tuple[str, float, float]] = []
+        self.read_cancelled = asyncio.Event()
+        self.closed = False
+
+    async def read_and_remove(
+        self,
+        remote_path: str,
+        timeout: float = 6.0,
+        cleanup_grace: float = 1.5,
+    ) -> bytes:
+        self.read_calls.append((remote_path, timeout, cleanup_grace))
+        if self.block_read:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.read_cancelled.set()
+        if self.read_error is not None:
+            raise self.read_error
+        return self.image_bytes
+
+    async def sweep_temp_files(
+        self,
+        prefix: str = "/tmp/lg_smtv_cap_",
+        exclude: str | None = None,
+    ) -> None:
+        _ = (prefix, exclude)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def _make_config(tmp_path: Path, *, with_ssh: bool = False) -> TvConfig:
     ssh_key = tmp_path / "id_rsa"
     known_hosts = tmp_path / "known_hosts"
@@ -89,7 +130,7 @@ def _make_config(tmp_path: Path, *, with_ssh: bool = False) -> TvConfig:
 
 
 async def test_async_ssh_capture_transport_connect_uses_required_args(tmp_path: Path) -> None:
-    sftp = FakeSftpClient(files={"/tmp/lg_smtv_cap_1.jpg": b"jpeg"}, list_names=[])
+    sftp = FakeSftpClient(files={"/tmp/lg_smtv_cap_1.jpg": b"jpeg"})
     conn = FakeSshConnection(sftp)
     calls: list[dict[str, Any]] = []
 
@@ -119,12 +160,12 @@ async def test_async_ssh_capture_transport_sweeps_on_initial_connect_and_reconne
 ) -> None:
     sftp1 = FakeSftpClient(
         files={"/tmp/lg_smtv_cap_1.jpg": b"one"},
-        list_names=["lg_smtv_cap_old.jpg", "other.txt"],
+        extra_names=["lg_smtv_cap_old.jpg", "other.txt"],
     )
     conn1 = FakeSshConnection(sftp1)
     sftp2 = FakeSftpClient(
         files={"/tmp/lg_smtv_cap_2.jpg": b"two"},
-        list_names=["lg_smtv_cap_stale.jpg", "keep.txt"],
+        extra_names=["lg_smtv_cap_stale.jpg", "keep.txt"],
     )
     conn2 = FakeSshConnection(sftp2)
     conns = [conn1, conn2]
@@ -147,6 +188,81 @@ async def test_async_ssh_capture_transport_sweeps_on_initial_connect_and_reconne
     assert data == b"two"
     assert "/tmp/lg_smtv_cap_stale.jpg" in sftp2.remove_calls
     assert "/tmp/keep.txt" not in sftp2.remove_calls
+
+
+async def test_async_ssh_capture_transport_sweep_preserves_in_flight_remote_path(
+    tmp_path: Path,
+) -> None:
+    remote_path = "/tmp/lg_smtv_cap_1.jpg"
+    sftp = FakeSftpClient(
+        files={
+            remote_path: b"fresh-frame",
+            "/tmp/lg_smtv_cap_stale.jpg": b"stale-frame",
+        },
+        extra_names=["other_file.txt"],
+    )
+    conn = FakeSshConnection(sftp)
+
+    async def fake_connect(**kwargs: Any) -> FakeSshConnection:
+        _ = kwargs
+        return conn
+
+    transport = AsyncSshCaptureTransport(_make_config(tmp_path), connect_fn=fake_connect)
+    data = await transport.read_and_remove(remote_path)
+
+    assert data == b"fresh-frame"
+    assert "/tmp/lg_smtv_cap_stale.jpg" in sftp.remove_calls
+    assert remote_path in sftp.remove_calls
+    assert "/tmp/other_file.txt" not in sftp.remove_calls
+
+
+async def test_async_ssh_capture_transport_closes_connection_when_start_sftp_client_fails(
+    tmp_path: Path,
+) -> None:
+    class FailingSshConnection:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def start_sftp_client(self) -> Any:
+            raise OSError("sftp start failed")
+
+        def close(self) -> None:
+            self.closed = True
+
+        async def wait_closed(self) -> None:
+            return None
+
+    conn = FailingSshConnection()
+
+    async def fake_connect(**kwargs: Any) -> FailingSshConnection:
+        _ = kwargs
+        return conn
+
+    transport = AsyncSshCaptureTransport(_make_config(tmp_path), connect_fn=fake_connect)
+    with pytest.raises(OSError):
+        await transport.read_and_remove("/tmp/lg_smtv_cap_1.jpg")
+
+    assert conn.closed is True
+
+
+async def test_async_ssh_capture_transport_enforces_read_timeout(
+    tmp_path: Path,
+) -> None:
+    class HangingSftp(FakeSftpClient):
+        async def read(self, path: str) -> bytes:
+            await asyncio.sleep(10.0)
+            return b"never"
+
+    sftp = HangingSftp(files={"/tmp/lg_smtv_cap_1.jpg": b"bytes"})
+    conn = FakeSshConnection(sftp)
+
+    async def fake_connect(**kwargs: Any) -> FakeSshConnection:
+        _ = kwargs
+        return conn
+
+    transport = AsyncSshCaptureTransport(_make_config(tmp_path), connect_fn=fake_connect)
+    with pytest.raises(TimeoutError):
+        await transport.read_and_remove("/tmp/lg_smtv_cap_1.jpg", timeout=0.05)
 
 
 async def test_async_ssh_capture_transport_finishes_remove_after_cancellation(
@@ -175,7 +291,7 @@ async def test_async_ssh_capture_transport_finishes_remove_after_cancellation(
         return conn
 
     transport = AsyncSshCaptureTransport(_make_config(tmp_path), connect_fn=fake_connect)
-    read_task = asyncio.create_task(transport.read_and_remove(remote_path))
+    read_task = asyncio.create_task(transport.read_and_remove(remote_path, cleanup_grace=0.05))
     try:
         await asyncio.wait_for(sftp.remove_started.wait(), timeout=1.0)
         read_task.cancel()
@@ -191,29 +307,11 @@ async def test_async_ssh_capture_transport_finishes_remove_after_cancellation(
     assert remote_path in sftp.remove_calls
 
 
-async def test_capture_client_sends_execute_one_shot_and_returns_metadata(tmp_path: Path) -> None:
-    _ = tmp_path
+async def test_capture_client_sends_execute_one_shot_and_returns_metadata() -> None:
     image = b"frame-bytes"
     expected_sha = hashlib.sha256(image).hexdigest()
 
-    class FakeTransport:
-        def __init__(self) -> None:
-            self.read_calls: list[tuple[str, float, float]] = []
-            self.closed = False
-
-        async def read_and_remove(
-            self, remote_path: str, timeout: float = 6.0, cleanup_grace: float = 1.5
-        ) -> bytes:
-            self.read_calls.append((remote_path, timeout, cleanup_grace))
-            return image
-
-        async def sweep_temp_files(self, prefix: str = "/tmp/lg_smtv_cap_") -> None:
-            _ = prefix
-
-        async def close(self) -> None:
-            self.closed = True
-
-    transport = FakeTransport()
+    transport = FakeCaptureTransport(image_bytes=image)
     client = CaptureClient(transport)
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -236,24 +334,8 @@ async def test_capture_client_sends_execute_one_shot_and_returns_metadata(tmp_pa
     assert result.size_bytes == len(image)
 
 
-async def test_capture_client_changed_since_last_and_close_resets(tmp_path: Path) -> None:
-    _ = tmp_path
-    image = b"same"
-
-    class FakeTransport:
-        async def read_and_remove(
-            self, remote_path: str, timeout: float = 6.0, cleanup_grace: float = 1.5
-        ) -> bytes:
-            _ = (remote_path, timeout, cleanup_grace)
-            return image
-
-        async def sweep_temp_files(self, prefix: str = "/tmp/lg_smtv_cap_") -> None:
-            _ = prefix
-
-        async def close(self) -> None:
-            return None
-
-    client = CaptureClient(FakeTransport())
+async def test_capture_client_changed_since_last_and_close_resets() -> None:
+    client = CaptureClient(FakeCaptureTransport(image_bytes=b"same"))
 
     async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
         _ = (uri, payload)
@@ -275,28 +357,9 @@ async def test_capture_client_changed_since_last_and_close_resets(tmp_path: Path
     ids=["false", "missing", "null"],
 )
 async def test_capture_client_rejects_non_true_return_value_without_sftp_read(
-    tmp_path: Path, response: dict[str, Any]
+    response: dict[str, Any],
 ) -> None:
-    _ = tmp_path
-
-    class FakeTransport:
-        def __init__(self) -> None:
-            self.read_calls = 0
-
-        async def read_and_remove(
-            self, remote_path: str, timeout: float = 6.0, cleanup_grace: float = 1.5
-        ) -> bytes:
-            _ = (remote_path, timeout, cleanup_grace)
-            self.read_calls += 1
-            return b"nope"
-
-        async def sweep_temp_files(self, prefix: str = "/tmp/lg_smtv_cap_") -> None:
-            _ = prefix
-
-        async def close(self) -> None:
-            return None
-
-    transport = FakeTransport()
+    transport = FakeCaptureTransport()
     client = CaptureClient(transport)
 
     async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -306,26 +369,11 @@ async def test_capture_client_rejects_non_true_return_value_without_sftp_read(
     with pytest.raises(TvError) as exc_info:
         await client.capture_frame(ssap_request)
     assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
-    assert transport.read_calls == 0
+    assert len(transport.read_calls) == 0
 
 
-async def test_capture_client_preserves_standby_and_pairing_errors(tmp_path: Path) -> None:
-    _ = tmp_path
-
-    class FakeTransport:
-        async def read_and_remove(
-            self, remote_path: str, timeout: float = 6.0, cleanup_grace: float = 1.5
-        ) -> bytes:
-            _ = (remote_path, timeout, cleanup_grace)
-            return b"img"
-
-        async def sweep_temp_files(self, prefix: str = "/tmp/lg_smtv_cap_") -> None:
-            _ = prefix
-
-        async def close(self) -> None:
-            return None
-
-    client = CaptureClient(FakeTransport())
+async def test_capture_client_preserves_standby_and_pairing_errors() -> None:
+    client = CaptureClient(FakeCaptureTransport())
 
     async def standby_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
         _ = (uri, payload)
@@ -344,27 +392,8 @@ async def test_capture_client_preserves_standby_and_pairing_errors(tmp_path: Pat
     assert pairing_exc.value.code is ErrorCode.PAIRING_REQUIRED
 
 
-async def test_capture_client_maps_command_failed_without_sftp_read(tmp_path: Path) -> None:
-    _ = tmp_path
-
-    class FakeTransport:
-        def __init__(self) -> None:
-            self.read_calls = 0
-
-        async def read_and_remove(
-            self, remote_path: str, timeout: float = 6.0, cleanup_grace: float = 1.5
-        ) -> bytes:
-            _ = (remote_path, timeout, cleanup_grace)
-            self.read_calls += 1
-            return b"nope"
-
-        async def sweep_temp_files(self, prefix: str = "/tmp/lg_smtv_cap_") -> None:
-            _ = prefix
-
-        async def close(self) -> None:
-            return None
-
-    transport = FakeTransport()
+async def test_capture_client_maps_command_failed_without_sftp_read() -> None:
+    transport = FakeCaptureTransport()
     client = CaptureClient(transport)
 
     async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -374,26 +403,12 @@ async def test_capture_client_maps_command_failed_without_sftp_read(tmp_path: Pa
     with pytest.raises(TvError) as exc_info:
         await client.capture_frame(ssap_request)
     assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
-    assert transport.read_calls == 0
+    assert len(transport.read_calls) == 0
 
 
-async def test_capture_client_maps_sftp_os_error_to_screenshot_unavailable(tmp_path: Path) -> None:
-    _ = tmp_path
-
-    class FakeTransport:
-        async def read_and_remove(
-            self, remote_path: str, timeout: float = 6.0, cleanup_grace: float = 1.5
-        ) -> bytes:
-            _ = (remote_path, timeout, cleanup_grace)
-            raise OSError("sftp read failed")
-
-        async def sweep_temp_files(self, prefix: str = "/tmp/lg_smtv_cap_") -> None:
-            _ = prefix
-
-        async def close(self) -> None:
-            return None
-
-    client = CaptureClient(FakeTransport())
+async def test_capture_client_maps_sftp_os_error_to_screenshot_unavailable() -> None:
+    transport = FakeCaptureTransport(read_error=OSError("sftp read failed"))
+    client = CaptureClient(transport)
 
     async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
         _ = (uri, payload)
@@ -404,23 +419,8 @@ async def test_capture_client_maps_sftp_os_error_to_screenshot_unavailable(tmp_p
     assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
 
 
-async def test_capture_client_maps_timeout_to_screenshot_unavailable(tmp_path: Path) -> None:
-    _ = tmp_path
-
-    class FakeTransport:
-        async def read_and_remove(
-            self, remote_path: str, timeout: float = 6.0, cleanup_grace: float = 1.5
-        ) -> bytes:
-            _ = (remote_path, timeout, cleanup_grace)
-            return b"img"
-
-        async def sweep_temp_files(self, prefix: str = "/tmp/lg_smtv_cap_") -> None:
-            _ = prefix
-
-        async def close(self) -> None:
-            return None
-
-    client = CaptureClient(FakeTransport())
+async def test_capture_client_maps_timeout_to_screenshot_unavailable() -> None:
+    client = CaptureClient(FakeCaptureTransport())
 
     async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
         _ = (uri, payload)
@@ -432,30 +432,8 @@ async def test_capture_client_maps_timeout_to_screenshot_unavailable(tmp_path: P
     assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
 
 
-async def test_capture_client_maps_sftp_timeout_and_cancels_read(tmp_path: Path) -> None:
-    _ = tmp_path
-
-    class BlockingTransport:
-        def __init__(self) -> None:
-            self.read_cancelled = asyncio.Event()
-
-        async def read_and_remove(
-            self, remote_path: str, timeout: float = 6.0, cleanup_grace: float = 1.5
-        ) -> bytes:
-            _ = (remote_path, timeout, cleanup_grace)
-            try:
-                await asyncio.Event().wait()
-            finally:
-                self.read_cancelled.set()
-            raise AssertionError("capture read should be cancelled by the timeout")
-
-        async def sweep_temp_files(self, prefix: str = "/tmp/lg_smtv_cap_") -> None:
-            _ = prefix
-
-        async def close(self) -> None:
-            return None
-
-    transport = BlockingTransport()
+async def test_capture_client_maps_sftp_timeout_and_cancels_read() -> None:
+    transport = FakeCaptureTransport(block_read=True)
     client = CaptureClient(transport)
 
     async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
