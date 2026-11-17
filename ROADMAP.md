@@ -2,19 +2,22 @@
 
 ## Current Direction
 
-`lg-smtv-mcp` has completed its M1 MVP control plane (persistent SSAP, pointer input, WoL recovery, FastMCP tools, Bearer auth, `pair`/`serve` CLI, and full-stack offline E2E verification) and is moving into Milestone M2 to add Developer Mode SFTP screenshot capture, deployment packaging, and E2E test hardening.
+`lg-smtv-mcp` has completed its M1 MVP control plane (persistent SSAP, pointer input, WoL recovery, FastMCP tools, Bearer auth, `pair`/`serve` CLI, and full-stack offline E2E verification) and the M2 capture and E2E-hardening slices. Remaining M2 work is deployment packaging and its `systemd` hardening follow-up.
 
 ## Near Term (Milestone M2)
 
-- **Developer Mode SFTP Capture ([#12](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/12)):** Implement `tv_core/capture.py` (`CaptureClient` + `AsyncSshCaptureTransport` behind `FrameCapturer` / `CaptureTransport`) with `6s` shared deadline, shielded `finally: sftp.remove()` cleanup, `/tmp/lg_smtv_cap_*.jpg` reconnect sweep, `frame_sha256` / `changed_since_last` tracking, and default `server.py` wiring.
 - **Systemd Unit & Deployment Docs ([#13](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/13)):** Add `deploy/lg-smtv-mcp.service` template and document systemd + Developer Mode SSH setup in `README.md`.
-- **E2E Harness & Standby Parity Hardening ([#11](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/11)):** Address PR `#10` review follow-ups in [`tests/test_e2e_mvp.py`](tests/test_e2e_mvp.py) (`_build_online_ssap` extraction, fast-fail ASGI lifespan startup errors, `elapsed_ms` contract check, and post-`turn_off()` `1008` -> `get_state` stale verification).
+- **Systemd Unit Sandboxing Hardening ([#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17)):** Follow-up to `#13`, tightening the unit's sandboxing directives once the baseline deployment template lands.
 
 ## Medium Term
 
 - **Live-TV Operator Smoke Verification:** Execute the manual LAN smoke checklist in [`README.md`](README.md#operator-live-tv-e2e-smoke-test-checklist) and Developer Mode capture verification against the target `WebOS/4.1.0` TV.
 
 ## Completed
+
+### M2: Capture & E2E Hardening (partial, 2026-11-16)
+- **#11 (PR [#14](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/14)):** E2E harness hardening in [`tests/test_e2e_mvp.py`](tests/test_e2e_mvp.py) — fast-fail ASGI lifespan startup, `elapsed_ms` contract check, and post-`turn_off()` `1008` -> `get_state` stale parity.
+- **#12 (PR [#15](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/15)):** `tv_core/capture.py` (`CaptureClient` + `AsyncSshCaptureTransport`), default `server.py` wiring, and offline capture contract tests; review remediation CR-01..CR-11 landed in `61d2315`.
 
 ### M1: MVP Core & End-to-End Verification (Completed 2026-11-16)
 - **#1 (PR [#6](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/6)):** Nix flake packaging, `pyproject.toml`, Pydantic v2 `TvConfig`, and `ConfigError` / `TvError` taxonomy.

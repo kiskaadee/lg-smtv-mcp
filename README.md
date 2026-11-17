@@ -6,8 +6,8 @@ A Python Model Context Protocol (MCP) server for persistent, local-network contr
 
 The server is deliberately **LLM-free**: it exposes bounded, deterministic operations so external AI agents (such as Antigravity, Claude, or a vision-guided decision loop) can reason over UI state and control the television without embedding model APIs into the daemon.
 
-> **Status: Milestone M1 complete (MVP).**
-> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), and full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)) are implemented and tested. Developer Mode SFTP screenshot capture is planned for M2.
+> **Status: M2 in progress — capture delivered.**
+> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)), and Developer Mode SFTP screenshot capture ([`capture.py`](src/lg_smtv_mcp/tv_core/capture.py)) are implemented and tested. The remaining M2 work is the `systemd` unit and deployment documentation ([#13](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/13)).
 
 ---
 
@@ -35,14 +35,14 @@ The codebase centers on [`tv_core`](src/lg_smtv_mcp/tv_core/), which owns the TV
 | [`PointerClient`](src/lg_smtv_mcp/tv_core/pointer.py) | Implemented | Ephemeral webOS pointer socket for allowlisted remote button frames and mid-batch reconnect |
 | [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) | Implemented | Single-owner connection loop, stepped backoff, `wake()` coalescing, `subscribe` cache, `ui_lock`, control surface |
 | [`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py), [`cli.py`](src/lg_smtv_mcp/cli.py) | Implemented | FastMCP tools, `streamable-http` Bearer auth & host validation, `pair` / `serve` CLI, `SIGHUP` key reload |
-| Developer Mode Capture (`capture.py`) | Planned (M2) | `asyncssh` SFTP screenshot retrieval behind the [`FrameCapturer`](src/lg_smtv_mcp/tv_core/protocols.py) protocol |
+| Developer Mode Capture ([`capture.py`](src/lg_smtv_mcp/tv_core/capture.py)) | Implemented | `CaptureClient` + `AsyncSshCaptureTransport`: `asyncssh` SFTP screenshot retrieval behind the [`FrameCapturer`](src/lg_smtv_mcp/tv_core/protocols.py) / `CaptureTransport` protocols, with a shared `6s` deadline and `/tmp` sweep |
 
 ### Communication Channels
 
 - **SSAP (`wss://<TV_IP>:3001`):** JSON-over-WebSocket for device control, app launching, IME text input, external input switching, and `subscribe` state streams (`audio/getStatus`, `getForegroundAppInfo`).
 - **Pointer Input Socket (`wss://...`):** Line-oriented socket obtained via SSAP for remote D-pad and navigation button events (`UP`, `DOWN`, `ENTER`, `HOME`, `BACK`, etc.).
 - **Wake-on-LAN (UDP):** Explicit device wake-up via magic packets, separated from normal control requests so standby detection fails fast instead of silently waking the TV.
-- **Developer Mode SSH/SFTP (Planned M2):** Optional remote screenshot capture (`FrameCapturer` interface already wired in `TvManager` with graceful partial-success degradation when unavailable).
+- **Developer Mode SSH/SFTP (`prisoner@<TV_IP>:9922`):** Optional remote screenshot capture over a reusable `asyncssh` session (`CaptureClient` behind the `FrameCapturer` protocol, default-wired in [`server.py`](src/lg_smtv_mcp/server.py)). When Developer Mode SSH is unavailable, `keys`/`type_text` still return partial success with `capture_error`, and `screenshot` fails with `SCREENSHOT_UNAVAILABLE`.
 
 ### Design Principles
 
@@ -61,7 +61,7 @@ Implementation is tracked on the [Project Pipeline](https://gitea.roadtotech.me/
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
 | **M1** | Core config, `tv_core` engine, FastMCP tools, Bearer auth, `pair`/`serve` CLI, E2E verification | Complete (`#1`–`#4` merged on `main`) |
-| **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, E2E test hardening | Planned (`#11`, `#12`, `#13`) |
+| **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, E2E test hardening | In progress — capture (`#12`) and E2E hardening (`#11`) merged; systemd deployment (`#13`) open |
 
 Implemented in [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) and exposed via [`server.py`](src/lg_smtv_mcp/server.py):
 - Persistent SSAP multiplexing and `subscribe`-backed state snapshots (`get_state`: `volume`, `muted`, `sound_output`, `foreground_app`)
@@ -75,7 +75,7 @@ Implemented in [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) and exposed via
 
 - **Runtime:** Python 3.14+ (or Nix with Flakes enabled)
 - **Hardware:** An LG webOS Smart TV reachable on the local network (with Wake-on-LAN and LG Connect Apps enabled for power-on and SSAP control)
-- **Optional (M2):** LG Developer Mode enabled for SSH/SFTP screenshot capture
+- **Optional:** LG Developer Mode enabled for SSH/SFTP screenshot capture
 
 Initial protocol exploration and empirical verification were performed against:
 - **Device:** `65UR8750PSA`
@@ -203,7 +203,7 @@ nix flake check
 ## Documentation
 
 - [Architecture](ARCHITECTURE.md) — Canonical present-state system topology, components, and boundaries
-- [Roadmap](ROADMAP.md) — Completed M1 milestones and planned M2 delivery trajectory
+- [Roadmap](ROADMAP.md) — Completed M1/M2 milestones and remaining M2 delivery trajectory
 - [Decision Records](docs/adr/) — MADR records for core architectural choices (`0001`–`0005`)
 - [Architecture & Design RFC](docs/designs/lg-smtv-mcp.md) — Component contracts, state machine, error taxonomy, and implementation plan
 - [Verified Capabilities](docs/poc/capabilities.md) — Empirical SSAP, DIAL, deep-link, and Developer Mode findings
