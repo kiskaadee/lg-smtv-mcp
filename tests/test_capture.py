@@ -149,12 +149,25 @@ async def test_async_ssh_capture_transport_sweeps_on_initial_connect_and_reconne
     assert "/tmp/keep.txt" not in sftp2.remove_calls
 
 
-async def test_async_ssh_capture_transport_shields_remove_on_read_error(tmp_path: Path) -> None:
-    sftp = FakeSftpClient(
-        files={"/tmp/lg_smtv_cap_1.jpg": b"jpeg"},
-        read_error=OSError("read failed"),
-        remove_delay=0.05,
-    )
+async def test_async_ssh_capture_transport_finishes_remove_after_cancellation(
+    tmp_path: Path,
+) -> None:
+    remote_path = "/tmp/lg_smtv_cap_1.jpg"
+
+    class BlockingRemoveSftp(FakeSftpClient):
+        def __init__(self) -> None:
+            super().__init__(files={remote_path: b"jpeg"})
+            self.remove_started = asyncio.Event()
+            self.allow_remove = asyncio.Event()
+            self.remove_finished = asyncio.Event()
+
+        async def remove(self, path: str) -> None:
+            self.remove_started.set()
+            await self.allow_remove.wait()
+            await super().remove(path)
+            self.remove_finished.set()
+
+    sftp = BlockingRemoveSftp()
     conn = FakeSshConnection(sftp)
 
     async def fake_connect(**kwargs: Any) -> FakeSshConnection:
@@ -162,10 +175,20 @@ async def test_async_ssh_capture_transport_shields_remove_on_read_error(tmp_path
         return conn
 
     transport = AsyncSshCaptureTransport(_make_config(tmp_path), connect_fn=fake_connect)
-    with pytest.raises(OSError, match="read failed"):
-        await transport.read_and_remove("/tmp/lg_smtv_cap_1.jpg", timeout=6.0, cleanup_grace=1.5)
+    read_task = asyncio.create_task(transport.read_and_remove(remote_path))
+    try:
+        await asyncio.wait_for(sftp.remove_started.wait(), timeout=1.0)
+        read_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await read_task
+    finally:
+        sftp.allow_remove.set()
+        if not read_task.done():
+            read_task.cancel()
+            await asyncio.gather(read_task, return_exceptions=True)
 
-    assert "/tmp/lg_smtv_cap_1.jpg" in sftp.remove_calls
+    await asyncio.wait_for(sftp.remove_finished.wait(), timeout=1.0)
+    assert remote_path in sftp.remove_calls
 
 
 async def test_capture_client_sends_execute_one_shot_and_returns_metadata(tmp_path: Path) -> None:
@@ -246,8 +269,13 @@ async def test_capture_client_changed_since_last_and_close_resets(tmp_path: Path
     assert third.changed_since_last is True
 
 
-async def test_capture_client_maps_execute_one_shot_failure_without_sftp_read(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "response",
+    [{"returnValue": False}, {}, {"returnValue": None}],
+    ids=["false", "missing", "null"],
+)
+async def test_capture_client_rejects_non_true_return_value_without_sftp_read(
+    tmp_path: Path, response: dict[str, Any]
 ) -> None:
     _ = tmp_path
 
@@ -273,7 +301,7 @@ async def test_capture_client_maps_execute_one_shot_failure_without_sftp_read(
 
     async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
         _ = (uri, payload)
-        return {"returnValue": False}
+        return response
 
     with pytest.raises(TvError) as exc_info:
         await client.capture_frame(ssap_request)
@@ -402,3 +430,40 @@ async def test_capture_client_maps_timeout_to_screenshot_unavailable(tmp_path: P
     with pytest.raises(TvError) as exc_info:
         await client.capture_frame(ssap_request)
     assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
+
+
+async def test_capture_client_maps_sftp_timeout_and_cancels_read(tmp_path: Path) -> None:
+    _ = tmp_path
+
+    class BlockingTransport:
+        def __init__(self) -> None:
+            self.read_cancelled = asyncio.Event()
+
+        async def read_and_remove(
+            self, remote_path: str, timeout: float = 6.0, cleanup_grace: float = 1.5
+        ) -> bytes:
+            _ = (remote_path, timeout, cleanup_grace)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.read_cancelled.set()
+            raise AssertionError("capture read should be cancelled by the timeout")
+
+        async def sweep_temp_files(self, prefix: str = "/tmp/lg_smtv_cap_") -> None:
+            _ = prefix
+
+        async def close(self) -> None:
+            return None
+
+    transport = BlockingTransport()
+    client = CaptureClient(transport)
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = (uri, payload)
+        return {"returnValue": True}
+
+    with pytest.raises(TvError) as exc_info:
+        await asyncio.wait_for(client.capture_frame(ssap_request), timeout=7.0)
+
+    assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
+    assert transport.read_cancelled.is_set()

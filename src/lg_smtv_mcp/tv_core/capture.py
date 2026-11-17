@@ -160,10 +160,10 @@ class CaptureClient:
                         f"executeOneShot failed: {exc.message}",
                     ) from exc
 
-                if response.get("returnValue") is False:
+                if response.get("returnValue") is not True:
                     raise TvError(
                         ErrorCode.SCREENSHOT_UNAVAILABLE,
-                        "executeOneShot returned returnValue false",
+                        "executeOneShot did not return returnValue true",
                     )
 
                 try:
