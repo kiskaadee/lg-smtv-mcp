@@ -207,7 +207,7 @@ The unit template includes a tested systemd sandboxing baseline (Issue [#17](htt
 
 - **Rejected Directives (Compatibility Constraints):**
   - `ProtectHome=yes` / `ProtectHome=read-only`: Ruled out because `nix develop` requires read-write access to `~/.cache/nix/fetcher-locks` for flake evaluation, and the repository checkout resides under the operator's user directory.
-  - `ProtectSystem=strict`: Ruled out because `nix develop` requires writable `/tmp` for development shell temporary files (`/tmp/nix-shell.*`).
+  - `ProtectSystem=strict`: Ruled out because it mounts the entire filesystem read-only, including the operator's home directory and the repository checkout; `nix develop` needs write access to `~/.cache/nix/fetcher-locks` for flake evaluation (the same constraint that rules out `ProtectHome`). Writable `/tmp` is not the blocker: with `PrivateTmp=yes`, systemd keeps `/tmp` and `/var/tmp` writable even under `strict`.
   - `PrivateNetwork=yes`: Ruled out because the MCP daemon must communicate over the local network to the TV via SSAP (`wss://:3001`), Developer Mode SSH/SFTP (`:9922`), and Wake-on-LAN UDP broadcasts.
 
 ### Developer Mode SSH Capture Setup
