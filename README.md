@@ -6,8 +6,8 @@ A Python Model Context Protocol (MCP) server for persistent, local-network contr
 
 The server is deliberately **LLM-free**: it exposes bounded, deterministic operations so external AI agents (such as Antigravity, Claude, or a vision-guided decision loop) can reason over UI state and control the television without embedding model APIs into the daemon.
 
-> **Status: M2 in progress — capture delivered.**
-> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)), and Developer Mode SFTP screenshot capture ([`capture.py`](src/lg_smtv_mcp/tv_core/capture.py)) are implemented and tested. The remaining M2 work is the `systemd` unit and deployment documentation ([#13](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/13)).
+> **Status: M2 delivered — capture, E2E hardening, and `systemd` deployment.**
+> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)), and Developer Mode SFTP screenshot capture ([`capture.py`](src/lg_smtv_mcp/tv_core/capture.py)) are implemented and tested. Milestone M2 is delivered; `systemd` unit sandboxing hardening is tracked separately in [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17).
 
 ---
 
@@ -61,7 +61,7 @@ Implementation is tracked on the [Project Pipeline](https://gitea.roadtotech.me/
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
 | **M1** | Core config, `tv_core` engine, FastMCP tools, Bearer auth, `pair`/`serve` CLI, E2E verification | Complete (`#1`–`#4` merged on `main`) |
-| **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, E2E test hardening | In progress — capture (`#12`) and E2E hardening (`#11`) merged; systemd deployment (`#13`) open |
+| **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, E2E test hardening | Delivered — capture (`#12`), E2E hardening (`#11`), and systemd deployment (`#13`); unit sandboxing hardening tracked in `#17` |
 
 Implemented in [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) and exposed via [`server.py`](src/lg_smtv_mcp/server.py):
 - Persistent SSAP multiplexing and `subscribe`-backed state snapshots (`get_state`: `volume`, `muted`, `sound_output`, `foreground_app`)
