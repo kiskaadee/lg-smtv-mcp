@@ -44,7 +44,13 @@ def _recompress_jpeg(
             out = BytesIO()
             img.save(out, format="JPEG", quality=quality)
             return out.getvalue()
-    except (UnidentifiedImageError, OSError, ValueError, EOFError) as exc:
+    except (
+        UnidentifiedImageError,
+        Image.DecompressionBombError,
+        OSError,
+        ValueError,
+        EOFError,
+    ) as exc:
         raise TvError(
             ErrorCode.SCREENSHOT_UNAVAILABLE,
             f"Failed to process screenshot image: {exc}",

@@ -460,17 +460,17 @@ async def test_server_http_app_allows_authenticated_mcp_initialize_request(
         await asyncio.wait_for(lifespan_task, timeout=2.0)
 
 
-async def test_server_create_mcp_server_wires_default_capture_client(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _wire_capture_client_with_fake_ssh(
+    monkeypatch: pytest.MonkeyPatch,
+    config: TvConfig,
+) -> tuple[dict[str, Any], dict[str, bytes], list[str], list[dict[str, Any]], list[Any]]:
     import lg_smtv_mcp.server as server_mod
-    from lg_smtv_mcp.tv_core.capture import CaptureClient
 
-    config = _make_config(tmp_path)
     captured: dict[str, Any] = {}
     remote_files: dict[str, bytes] = {}
     removed_paths: list[str] = []
     connect_calls: list[dict[str, Any]] = []
+    sftp_sessions: list[Any] = []
 
     class DummyManager:
         async def start(self) -> None:
@@ -488,6 +488,8 @@ async def test_server_create_mcp_server_wires_default_capture_client(
             return []
 
         def open(self, path: str, mode: str = "r") -> Any:
+            _ = mode
+
             class FakeFile:
                 async def __aenter__(self) -> FakeFile:
                     return self
@@ -506,8 +508,6 @@ async def test_server_create_mcp_server_wires_default_capture_client(
 
         async def exit(self) -> None:
             self.closed = True
-
-    sftp_sessions: list[FakeSftp] = []
 
     class FakeSshConnection:
         async def start_sftp_client(self) -> FakeSftp:
@@ -533,6 +533,18 @@ async def test_server_create_mcp_server_wires_default_capture_client(
     monkeypatch.setattr(server_mod, "TvManager", fake_tv_manager)
     monkeypatch.setattr(asyncssh, "connect", fake_connect)
     server_mod.create_mcp_server(config)
+    return captured, remote_files, removed_paths, connect_calls, sftp_sessions
+
+
+async def test_server_create_mcp_server_wires_default_capture_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lg_smtv_mcp.tv_core.capture import CaptureClient
+
+    config = _make_config(tmp_path)
+    captured, remote_files, removed_paths, connect_calls, sftp_sessions = (
+        _wire_capture_client_with_fake_ssh(monkeypatch, config)
+    )
 
     assert captured["config"] is config
     assert "capture_client" in captured["kwargs"]
@@ -565,7 +577,6 @@ async def test_server_create_mcp_server_wires_capture_downscaling_config(
 
     from PIL import Image
 
-    import lg_smtv_mcp.server as server_mod
     from lg_smtv_mcp.tv_core.capture import CaptureClient
 
     config = TvConfig(
@@ -574,64 +585,9 @@ async def test_server_create_mcp_server_wires_capture_downscaling_config(
         capture_max_width=640,
         capture_jpeg_quality=60,
     )
-    captured: dict[str, Any] = {}
-    remote_files: dict[str, bytes] = {}
-
-    class DummyManager:
-        async def start(self) -> None:
-            return None
-
-        async def close(self) -> None:
-            return None
-
-    class FakeSftp:
-        async def listdir(self, path: str) -> list[str]:
-            _ = path
-            return []
-
-        def open(self, path: str, mode: str = "r") -> Any:
-            _ = mode
-
-            class FakeFile:
-                async def __aenter__(self) -> FakeFile:
-                    return self
-
-                async def __aexit__(self, *_exc: object) -> None:
-                    return None
-
-                async def read(self) -> bytes:
-                    return remote_files[path]
-
-            return FakeFile()
-
-        async def remove(self, path: str) -> None:
-            remote_files.pop(path, None)
-
-        async def exit(self) -> None:
-            return None
-
-    class FakeSshConnection:
-        async def start_sftp_client(self) -> FakeSftp:
-            return FakeSftp()
-
-        def close(self) -> None:
-            return None
-
-        async def wait_closed(self) -> None:
-            return None
-
-    def fake_tv_manager(cfg: Any, **kwargs: Any) -> DummyManager:
-        captured["config"] = cfg
-        captured["kwargs"] = kwargs
-        return DummyManager()
-
-    async def fake_connect(**kwargs: Any) -> FakeSshConnection:
-        _ = kwargs
-        return FakeSshConnection()
-
-    monkeypatch.setattr(server_mod, "TvManager", fake_tv_manager)
-    monkeypatch.setattr(asyncssh, "connect", fake_connect)
-    server_mod.create_mcp_server(config)
+    captured, remote_files, _removed_paths, _connect_calls, _sftp_sessions = (
+        _wire_capture_client_with_fake_ssh(monkeypatch, config)
+    )
 
     capture_client = captured["kwargs"]["capture_client"]
     assert isinstance(capture_client, CaptureClient)

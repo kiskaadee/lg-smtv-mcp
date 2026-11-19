@@ -653,3 +653,20 @@ async def test_capture_client_raises_screenshot_unavailable_on_corrupt_image_byt
         await client.capture_frame(ssap_request)
 
     assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
+
+
+async def test_capture_client_maps_decompression_bomb_error_to_screenshot_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = _make_jpeg(32, 32, quality=95)
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+    client = CaptureClient(FakeCaptureTransport(image_bytes=raw), max_width=16)
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = (uri, payload)
+        return {"returnValue": True}
+
+    with pytest.raises(TvError) as exc_info:
+        await client.capture_frame(ssap_request)
+
+    assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
