@@ -22,6 +22,8 @@ def _clear_tv_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "MCP_BEARER_TOKEN",
         "MAX_VOLUME",
         "ENABLE_RAW_SSAP",
+        "CAPTURE_MAX_WIDTH",
+        "CAPTURE_JPEG_QUALITY",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -74,6 +76,8 @@ def test_load_config_uses_expected_defaults_when_optional_vars_unset(
     assert cfg.allowed_hosts == ()
     assert cfg.tv_mac is None
     assert cfg.mcp_bearer_token is None
+    assert cfg.capture_max_width is None
+    assert cfg.capture_jpeg_quality is None
 
 
 def test_dotenv_fallback_does_not_overwrite_existing_env(
@@ -108,6 +112,12 @@ def test_dotenv_fallback_does_not_overwrite_existing_env(
         ({"TV_IP": "192.0.2.10", "PORT": "0"}, "PORT"),
         ({"TV_IP": "192.0.2.10", "PORT": "65536"}, "PORT"),
         ({"TV_IP": "192.0.2.10", "PORT": "abc"}, "PORT"),
+        ({"TV_IP": "192.0.2.10", "CAPTURE_MAX_WIDTH": "63"}, "CAPTURE_MAX_WIDTH"),
+        ({"TV_IP": "192.0.2.10", "CAPTURE_MAX_WIDTH": "3841"}, "CAPTURE_MAX_WIDTH"),
+        ({"TV_IP": "192.0.2.10", "CAPTURE_MAX_WIDTH": "wide"}, "CAPTURE_MAX_WIDTH"),
+        ({"TV_IP": "192.0.2.10", "CAPTURE_JPEG_QUALITY": "0"}, "CAPTURE_JPEG_QUALITY"),
+        ({"TV_IP": "192.0.2.10", "CAPTURE_JPEG_QUALITY": "96"}, "CAPTURE_JPEG_QUALITY"),
+        ({"TV_IP": "192.0.2.10", "CAPTURE_JPEG_QUALITY": "high"}, "CAPTURE_JPEG_QUALITY"),
     ],
 )
 def test_load_config_rejects_invalid_env_values_with_config_error(
@@ -136,6 +146,14 @@ def test_load_config_rejects_invalid_env_values_with_config_error(
         ({"tv_ip": "192.0.2.10", "max_volume": 150}, "MAX_VOLUME"),
         ({"tv_ip": "192.0.2.10", "max_volume": 12.5}, "MAX_VOLUME"),
         ({"tv_ip": "192.0.2.10", "wol_broadcast": "bad-ip"}, "WOL_BROADCAST"),
+        ({"tv_ip": "192.0.2.10", "capture_max_width": 63}, "CAPTURE_MAX_WIDTH"),
+        ({"tv_ip": "192.0.2.10", "capture_max_width": 3841}, "CAPTURE_MAX_WIDTH"),
+        ({"tv_ip": "192.0.2.10", "capture_max_width": 1280.5}, "CAPTURE_MAX_WIDTH"),
+        ({"tv_ip": "192.0.2.10", "capture_max_width": True}, "CAPTURE_MAX_WIDTH"),
+        ({"tv_ip": "192.0.2.10", "capture_jpeg_quality": 0}, "CAPTURE_JPEG_QUALITY"),
+        ({"tv_ip": "192.0.2.10", "capture_jpeg_quality": 96}, "CAPTURE_JPEG_QUALITY"),
+        ({"tv_ip": "192.0.2.10", "capture_jpeg_quality": 75.5}, "CAPTURE_JPEG_QUALITY"),
+        ({"tv_ip": "192.0.2.10", "capture_jpeg_quality": False}, "CAPTURE_JPEG_QUALITY"),
     ],
 )
 def test_tv_config_rejects_invalid_direct_arguments_with_config_error(
@@ -210,3 +228,41 @@ def test_require_mac_returns_trimmed_value(monkeypatch: pytest.MonkeyPatch, tmp_
 
     cfg = load_config(env_path=tmp_path / "missing.env")
     assert require_mac(cfg) == "AA:BB:CC:DD:EE:FF"
+
+
+@pytest.mark.parametrize(
+    ("width_env", "quality_env", "expected_width", "expected_quality"),
+    [
+        ("64", "1", 64, 1),
+        ("3840", "95", 3840, 95),
+        (" 1280 ", " 75 ", 1280, 75),
+        ("", "   ", None, None),
+    ],
+)
+def test_load_config_parses_capture_max_width_and_jpeg_quality(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    width_env: str,
+    quality_env: str,
+    expected_width: int | None,
+    expected_quality: int | None,
+) -> None:
+    _clear_tv_env(monkeypatch)
+    monkeypatch.setenv("TV_IP", "192.0.2.10")
+    monkeypatch.setenv("CAPTURE_MAX_WIDTH", width_env)
+    monkeypatch.setenv("CAPTURE_JPEG_QUALITY", quality_env)
+
+    cfg = load_config(env_path=tmp_path / "missing.env")
+
+    assert cfg.capture_max_width == expected_width
+    assert cfg.capture_jpeg_quality == expected_quality
+
+
+def test_tv_config_accepts_explicit_none_and_valid_capture_bounds() -> None:
+    cfg_none = TvConfig(tv_ip="192.0.2.10", capture_max_width=None, capture_jpeg_quality=None)
+    assert cfg_none.capture_max_width is None
+    assert cfg_none.capture_jpeg_quality is None
+
+    cfg_bounds = TvConfig(tv_ip="192.0.2.10", capture_max_width=1280, capture_jpeg_quality=80)
+    assert cfg_bounds.capture_max_width == 1280
+    assert cfg_bounds.capture_jpeg_quality == 80

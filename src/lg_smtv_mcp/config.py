@@ -72,6 +72,8 @@ class TvConfig(BaseModel):
     mcp_bearer_token: str | None = None
     max_volume: int = 40
     enable_raw_ssap: bool = False
+    capture_max_width: int | None = None
+    capture_jpeg_quality: int | None = None
 
     def __init__(self, **data: Any) -> None:
         try:
@@ -99,6 +101,20 @@ class TvConfig(BaseModel):
     @classmethod
     def _validate_max_volume(cls, value: Any) -> int:
         return _parse_bounded_int("MAX_VOLUME", value, min_val=0, max_val=100)
+
+    @field_validator("capture_max_width", mode="before")
+    @classmethod
+    def _validate_capture_max_width(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        return _parse_bounded_int("CAPTURE_MAX_WIDTH", value, min_val=64, max_val=3840)
+
+    @field_validator("capture_jpeg_quality", mode="before")
+    @classmethod
+    def _validate_capture_jpeg_quality(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        return _parse_bounded_int("CAPTURE_JPEG_QUALITY", value, min_val=1, max_val=95)
 
 
 def _load_dotenv(env_path: Path) -> None:
@@ -149,6 +165,8 @@ def load_config(env_path: Path | None = Path(".env")) -> TvConfig:
     tv_ip = _optional_str("TV_IP") or ""
     port_raw = _optional_str("PORT")
     max_volume_raw = _optional_str("MAX_VOLUME")
+    capture_max_width_raw = _optional_str("CAPTURE_MAX_WIDTH")
+    capture_jpeg_quality_raw = _optional_str("CAPTURE_JPEG_QUALITY")
 
     host = _optional_str("HOST") or "127.0.0.1"
     wol_broadcast = _optional_str("WOL_BROADCAST") or "255.255.255.255"
@@ -177,6 +195,10 @@ def load_config(env_path: Path | None = Path(".env")) -> TvConfig:
         kwargs["port"] = port_raw
     if max_volume_raw is not None:
         kwargs["max_volume"] = max_volume_raw
+    if capture_max_width_raw is not None:
+        kwargs["capture_max_width"] = capture_max_width_raw
+    if capture_jpeg_quality_raw is not None:
+        kwargs["capture_jpeg_quality"] = capture_jpeg_quality_raw
 
     return TvConfig(**kwargs)
 
