@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from mcp.server.mcpserver import MCPServer
+from websockets.exceptions import WebSocketException
 
 from lg_smtv_mcp.auth import ASGIApp
 from lg_smtv_mcp.config import TvConfig, load_config
@@ -73,7 +74,7 @@ async def _pair_tv(
     existing_key: str | None,
     connect_fn: WebSocketConnectFn,
 ) -> str:
-    ws = await connect_fn(f"ws://{ip}:3000")
+    ws = await connect_fn(f"wss://{ip}:3001")
     try:
         reg_payload = build_register_payload(existing_key)
         await ws.send(json.dumps(reg_payload))
@@ -197,6 +198,6 @@ def main(
         if args.command == "serve":
             return _handle_serve(args, config, uvicorn_run=uvicorn_run, stdio_run=stdio_run)
         return _handle_pair(args, config, connect_fn=connect_fn, fetch_url=fetch_url)
-    except (ConfigError, TvError, OSError, ValueError) as exc:
+    except (ConfigError, TvError, WebSocketException, OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

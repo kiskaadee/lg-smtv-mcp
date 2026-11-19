@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 from mcp.server.mcpserver import MCPServer
+from websockets.exceptions import InvalidMessage
 
 from lg_smtv_mcp.auth import ASGIApp
 from lg_smtv_mcp.cli import main
@@ -122,7 +123,7 @@ def test_cli_pair_merges_existing_client_keys_and_writes_0600(tmp_path: Path) ->
     )
 
     assert rc == 0
-    assert connected_urls == ["ws://192.0.2.20:3000"]
+    assert connected_urls == ["wss://192.0.2.20:3001"]
     saved = json.loads(key_file.read_text(encoding="utf-8"))
     assert saved == {"192.0.2.10": "old-key", "192.0.2.20": "new-key-20"}
     assert stat.S_IMODE(key_file.stat().st_mode) == 0o600
@@ -196,3 +197,21 @@ def test_cli_pair_fetch_ssh_key_failure_preserves_client_key_and_exits_nonzero(
     assert rc == 1
     assert json.loads(key_file.read_text(encoding="utf-8")) == {"192.0.2.10": "tv-key-10"}
     assert not ssh_dest.exists()
+
+
+def test_cli_pair_returns_nonzero_on_websocket_handshake_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def failing_connect(_url: str) -> FakeWebSocketTransport:
+        raise InvalidMessage("did not receive a valid HTTP response")
+
+    rc = main(
+        ["pair"],
+        config_loader=lambda: _make_config(tmp_path),
+        connect_fn=failing_connect,
+    )
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "error: did not receive a valid HTTP response" in captured.err
