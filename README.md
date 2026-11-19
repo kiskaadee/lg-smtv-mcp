@@ -1,5 +1,7 @@
 # lg-smtv-mcp
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/kiskaadee-lg-smtv-mcp-1hkv9o?v=e22cd6151bbeb9e9a4b51cacc3bc775e)](https://m8ven.ai/mcp/kiskaadee-lg-smtv-mcp-1hkv9o?s=readme)
+
 A Python Model Context Protocol (MCP) server for persistent, local-network control of LG webOS Smart TVs.
 
 `lg-smtv-mcp` provides an agent-friendly control plane over LG's Simple Service Access Protocol (SSAP), combining persistent WebSocket connections, remote pointer button input, subscription-based device state tracking, Wake-on-LAN recovery, and optional Developer Mode screenshot capture.
