@@ -105,7 +105,7 @@ class AsyncSshCaptureTransport:
                 async with sftp.open(remote_path, "rb") as handle:
                     data = await handle.read()
                 return bytes(data)
-        except asyncssh.Error, OSError:
+        except asyncssh.Error, asyncssh.KeyImportError, OSError:
             await self._close_handles()
             raise
         finally:
@@ -192,7 +192,7 @@ class CaptureClient:
                     )
                 except TvError:
                     raise
-                except (asyncssh.Error, OSError) as exc:
+                except (asyncssh.Error, asyncssh.KeyImportError, OSError) as exc:
                     raise TvError(
                         ErrorCode.SCREENSHOT_UNAVAILABLE,
                         f"Failed to retrieve screenshot over SSH/SFTP: {exc}",

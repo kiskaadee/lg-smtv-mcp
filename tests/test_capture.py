@@ -504,3 +504,21 @@ async def test_capture_client_maps_sftp_timeout_and_cancels_read() -> None:
 
     assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
     assert transport.read_cancelled.is_set()
+
+
+async def test_capture_client_maps_key_import_error_to_screenshot_unavailable() -> None:
+    transport = FakeCaptureTransport(
+        read_error=asyncssh.KeyImportError(
+            "Passphrase must be specified to import encrypted private keys"
+        )
+    )
+    client = CaptureClient(transport)
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = (uri, payload)
+        return {"returnValue": True}
+
+    with pytest.raises(TvError) as exc_info:
+        await client.capture_frame(ssap_request)
+    assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
+    assert "Passphrase must be specified" in exc_info.value.message
