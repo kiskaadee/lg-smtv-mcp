@@ -160,7 +160,14 @@ def create_mcp_server(config: TvConfig, manager: TvManager | None = None) -> MCP
     tv_manager = (
         manager
         if manager is not None
-        else TvManager(config, capture_client=CaptureClient(AsyncSshCaptureTransport(config)))
+        else TvManager(
+            config,
+            capture_client=CaptureClient(
+                AsyncSshCaptureTransport(config),
+                max_width=config.capture_max_width,
+                jpeg_quality=config.capture_jpeg_quality,
+            ),
+        )
     )
 
     @asynccontextmanager

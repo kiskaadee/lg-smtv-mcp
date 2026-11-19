@@ -556,3 +556,100 @@ async def test_server_create_mcp_server_wires_default_capture_client(
     assert removed_paths == ["/tmp/lg_smtv_cap_1.jpg"]
     assert len(sftp_sessions) == 1
     assert sftp_sessions[0].closed is True
+
+
+async def test_server_create_mcp_server_wires_capture_downscaling_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from io import BytesIO
+
+    from PIL import Image
+
+    import lg_smtv_mcp.server as server_mod
+    from lg_smtv_mcp.tv_core.capture import CaptureClient
+
+    config = TvConfig(
+        tv_ip="192.0.2.10",
+        client_key_path=tmp_path / ".client_key.json",
+        capture_max_width=640,
+        capture_jpeg_quality=60,
+    )
+    captured: dict[str, Any] = {}
+    remote_files: dict[str, bytes] = {}
+
+    class DummyManager:
+        async def start(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    class FakeSftp:
+        async def listdir(self, path: str) -> list[str]:
+            _ = path
+            return []
+
+        def open(self, path: str, mode: str = "r") -> Any:
+            _ = mode
+
+            class FakeFile:
+                async def __aenter__(self) -> FakeFile:
+                    return self
+
+                async def __aexit__(self, *_exc: object) -> None:
+                    return None
+
+                async def read(self) -> bytes:
+                    return remote_files[path]
+
+            return FakeFile()
+
+        async def remove(self, path: str) -> None:
+            remote_files.pop(path, None)
+
+        async def exit(self) -> None:
+            return None
+
+    class FakeSshConnection:
+        async def start_sftp_client(self) -> FakeSftp:
+            return FakeSftp()
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    def fake_tv_manager(cfg: Any, **kwargs: Any) -> DummyManager:
+        captured["config"] = cfg
+        captured["kwargs"] = kwargs
+        return DummyManager()
+
+    async def fake_connect(**kwargs: Any) -> FakeSshConnection:
+        _ = kwargs
+        return FakeSshConnection()
+
+    monkeypatch.setattr(server_mod, "TvManager", fake_tv_manager)
+    monkeypatch.setattr(asyncssh, "connect", fake_connect)
+    server_mod.create_mcp_server(config)
+
+    capture_client = captured["kwargs"]["capture_client"]
+    assert isinstance(capture_client, CaptureClient)
+
+    buf = BytesIO()
+    Image.new("RGB", (1920, 1080), color=(30, 60, 90)).save(buf, format="JPEG", quality=95)
+    large_jpeg = buf.getvalue()
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = uri
+        remote_files[payload["path"]] = large_jpeg
+        return {"returnValue": True}
+
+    try:
+        result = await capture_client.capture_frame(ssap_request)
+    finally:
+        await capture_client.close()
+
+    with Image.open(BytesIO(result.image_bytes)) as img:
+        assert img.format == "JPEG"
+        assert img.size == (640, 360)

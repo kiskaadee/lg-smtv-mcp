@@ -17,6 +17,7 @@
         ps.pydantic
         ps.asyncssh
         ps.uvicorn
+        ps.pillow
       ];
 
       testDeps = [

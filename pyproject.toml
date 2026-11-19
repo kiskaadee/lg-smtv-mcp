@@ -13,6 +13,7 @@ dependencies = [
     "pydantic",
     "asyncssh",
     "uvicorn",
+    "pillow",
 ]
 
 [project.scripts]

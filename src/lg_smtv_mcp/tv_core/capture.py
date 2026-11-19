@@ -5,13 +5,50 @@ import hashlib
 import os
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from io import BytesIO
 from typing import Any
 
 import asyncssh
+from PIL import Image, UnidentifiedImageError
 
 from lg_smtv_mcp.config import TvConfig
 from lg_smtv_mcp.errors import ErrorCode, TvError
 from lg_smtv_mcp.tv_core.protocols import CaptureResult, CaptureTransport
+
+_DEFAULT_JPEG_QUALITY = 75
+
+
+def _recompress_jpeg(
+    raw_bytes: bytes,
+    *,
+    max_width: int | None,
+    jpeg_quality: int | None,
+) -> bytes:
+    """Optionally downscale and/or recompress JPEG bytes for inline MCP delivery."""
+    if max_width is None and jpeg_quality is None:
+        return raw_bytes
+
+    quality = jpeg_quality if jpeg_quality is not None else _DEFAULT_JPEG_QUALITY
+    try:
+        with Image.open(BytesIO(raw_bytes)) as opened:
+            img: Image.Image = opened
+            width, height = img.size
+            if max_width is not None and width > max_width:
+                target_height = max(1, round(height * (max_width / width)))
+                img = img.resize(  # pyright: ignore[reportUnknownMemberType]
+                    (max_width, target_height),
+                    Image.Resampling.LANCZOS,
+                )
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            out = BytesIO()
+            img.save(out, format="JPEG", quality=quality)
+            return out.getvalue()
+    except (UnidentifiedImageError, OSError, ValueError, EOFError) as exc:
+        raise TvError(
+            ErrorCode.SCREENSHOT_UNAVAILABLE,
+            f"Failed to process screenshot image: {exc}",
+        ) from exc
 
 
 class AsyncSshCaptureTransport:
@@ -154,8 +191,16 @@ class AsyncSshCaptureTransport:
 class CaptureClient:
     """FrameCapturer that triggers executeOneShot and fetches JPEG via SFTP."""
 
-    def __init__(self, transport: CaptureTransport) -> None:
+    def __init__(
+        self,
+        transport: CaptureTransport,
+        *,
+        max_width: int | None = None,
+        jpeg_quality: int | None = None,
+    ) -> None:
         self._transport = transport
+        self._max_width = max_width
+        self._jpeg_quality = jpeg_quality
         self._seq = 0
         self._last_sha256: str | None = None
 
@@ -203,6 +248,11 @@ class CaptureClient:
                 "Screenshot capture timed out after 6.0s",
             ) from exc
 
+        image_bytes = _recompress_jpeg(
+            image_bytes,
+            max_width=self._max_width,
+            jpeg_quality=self._jpeg_quality,
+        )
         frame_sha256 = hashlib.sha256(image_bytes).hexdigest()
         changed_since_last = self._last_sha256 != frame_sha256
         self._last_sha256 = frame_sha256

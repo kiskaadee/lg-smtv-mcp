@@ -3,11 +3,13 @@
 import asyncio
 import hashlib
 import inspect
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import asyncssh
 import pytest
+from PIL import Image
 
 from lg_smtv_mcp.config import TvConfig
 from lg_smtv_mcp.errors import ErrorCode, TvError
@@ -522,3 +524,132 @@ async def test_capture_client_maps_key_import_error_to_screenshot_unavailable() 
         await client.capture_frame(ssap_request)
     assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
     assert "Passphrase must be specified" in exc_info.value.message
+
+
+def _make_jpeg(
+    width: int,
+    height: int,
+    *,
+    color: tuple[int, int, int] = (25, 80, 160),
+    quality: int = 95,
+) -> bytes:
+    buf = BytesIO()
+    img = Image.new("RGB", (width, height), color=color)
+    # Draw varied pixels so JPEG recompression has realistic entropy differences.
+    for x in range(0, width, 8):
+        img.putpixel((x, x % height), ((x * 7) % 255, (x * 13) % 255, 200))
+    img.save(buf, format="JPEG", quality=quality)
+    return buf.getvalue()
+
+
+async def test_capture_client_passes_raw_bytes_unchanged_when_no_resize_or_quality() -> None:
+    raw = b"raw-unprocessed-bytes"
+    client = CaptureClient(FakeCaptureTransport(image_bytes=raw))
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = (uri, payload)
+        return {"returnValue": True}
+
+    result = await client.capture_frame(ssap_request)
+
+    assert result.image_bytes == raw
+    assert result.size_bytes == len(raw)
+    assert result.frame_sha256 == hashlib.sha256(raw).hexdigest()
+
+
+async def test_capture_client_downscales_preserving_aspect_ratio_with_default_quality_75() -> None:
+    raw = _make_jpeg(1920, 1080, quality=95)
+    client = CaptureClient(FakeCaptureTransport(image_bytes=raw), max_width=640)
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = (uri, payload)
+        return {"returnValue": True}
+
+    result = await client.capture_frame(ssap_request)
+
+    with Image.open(BytesIO(result.image_bytes)) as img:
+        assert img.format == "JPEG"
+        assert img.size == (640, 360)
+    assert result.size_bytes == len(result.image_bytes)
+    assert result.frame_sha256 == hashlib.sha256(result.image_bytes).hexdigest()
+    assert result.image_bytes != raw
+
+
+async def test_capture_client_never_upscales_when_width_at_or_below_max_width() -> None:
+    raw = _make_jpeg(800, 600, quality=95)
+    client = CaptureClient(
+        FakeCaptureTransport(image_bytes=raw),
+        max_width=1280,
+        jpeg_quality=80,
+    )
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = (uri, payload)
+        return {"returnValue": True}
+
+    result = await client.capture_frame(ssap_request)
+
+    with Image.open(BytesIO(result.image_bytes)) as img:
+        assert img.format == "JPEG"
+        assert img.size == (800, 600)
+
+
+async def test_capture_client_recompresses_at_native_resolution_when_only_quality_set() -> None:
+    raw = _make_jpeg(1280, 720, quality=95)
+    client = CaptureClient(FakeCaptureTransport(image_bytes=raw), jpeg_quality=30)
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = (uri, payload)
+        return {"returnValue": True}
+
+    result = await client.capture_frame(ssap_request)
+
+    with Image.open(BytesIO(result.image_bytes)) as img:
+        assert img.format == "JPEG"
+        assert img.size == (1280, 720)
+    assert result.size_bytes < len(raw)
+    assert result.frame_sha256 == hashlib.sha256(result.image_bytes).hexdigest()
+
+
+async def test_capture_client_hashes_and_tracks_changes_on_final_delivered_bytes() -> None:
+    raw = _make_jpeg(1280, 720, quality=95)
+    client = CaptureClient(
+        FakeCaptureTransport(image_bytes=raw),
+        max_width=640,
+        jpeg_quality=75,
+    )
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = (uri, payload)
+        return {"returnValue": True}
+
+    first = await client.capture_frame(ssap_request)
+    second = await client.capture_frame(ssap_request)
+
+    assert first.frame_sha256 != hashlib.sha256(raw).hexdigest()
+    assert first.frame_sha256 == hashlib.sha256(first.image_bytes).hexdigest()
+    assert first.changed_since_last is True
+    assert second.changed_since_last is False
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_width": 640},
+        {"jpeg_quality": 75},
+        {"max_width": 640, "jpeg_quality": 75},
+    ],
+)
+async def test_capture_client_raises_screenshot_unavailable_on_corrupt_image_bytes(
+    kwargs: dict[str, int],
+) -> None:
+    client = CaptureClient(FakeCaptureTransport(image_bytes=b"not-a-valid-jpeg"), **kwargs)
+
+    async def ssap_request(uri: str, payload: dict[str, Any]) -> dict[str, Any]:
+        _ = (uri, payload)
+        return {"returnValue": True}
+
+    with pytest.raises(TvError) as exc_info:
+        await client.capture_frame(ssap_request)
+
+    assert exc_info.value.code is ErrorCode.SCREENSHOT_UNAVAILABLE
