@@ -487,8 +487,18 @@ async def test_server_create_mcp_server_wires_default_capture_client(
             _ = path
             return []
 
-        async def read(self, path: str) -> bytes:
-            return remote_files[path]
+        def open(self, path: str, mode: str = "r") -> Any:
+            class FakeFile:
+                async def __aenter__(self) -> FakeFile:
+                    return self
+
+                async def __aexit__(self, *_exc: object) -> None:
+                    return None
+
+                async def read(self) -> bytes:
+                    return remote_files[path]
+
+            return FakeFile()
 
         async def remove(self, path: str) -> None:
             removed_paths.append(path)

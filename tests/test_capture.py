@@ -2,14 +2,45 @@
 
 import asyncio
 import hashlib
+import inspect
 from pathlib import Path
 from typing import Any
 
+import asyncssh
 import pytest
 
 from lg_smtv_mcp.config import TvConfig
 from lg_smtv_mcp.errors import ErrorCode, TvError
 from lg_smtv_mcp.tv_core.capture import AsyncSshCaptureTransport, CaptureClient
+
+
+class FakeSftpFile:
+    """Mirror asyncssh.SFTPClientFile: sync open(), async read(), async context manager."""
+
+    def __init__(
+        self,
+        data: bytes,
+        *,
+        error: Exception | None = None,
+        read_delay: float = 0.0,
+    ) -> None:
+        self._data = data
+        self._error = error
+        self._read_delay = read_delay
+        self.closed = False
+
+    async def __aenter__(self) -> FakeSftpFile:
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        self.closed = True
+
+    async def read(self) -> bytes:
+        if self._read_delay > 0:
+            await asyncio.sleep(self._read_delay)
+        if self._error is not None:
+            raise self._error
+        return self._data
 
 
 class FakeSftpClient:
@@ -19,25 +50,34 @@ class FakeSftpClient:
         files: dict[str, bytes] | None = None,
         extra_names: list[str] | None = None,
         read_error: Exception | None = None,
+        read_delay: float = 0.0,
         remove_delay: float = 0.0,
         remove_error: Exception | None = None,
     ) -> None:
         self.files = dict(files or {})
         self.extra_names = list(extra_names or [])
         self.read_error = read_error
+        self.read_delay = read_delay
         self.remove_delay = remove_delay
         self.remove_error = remove_error
-        self.read_calls: list[str] = []
+        self.open_calls: list[tuple[str, str]] = []
+        self.handles: list[FakeSftpFile] = []
         self.remove_calls: list[str] = []
         self.closed = False
 
-    async def read(self, path: str) -> bytes:
-        self.read_calls.append(path)
-        if self.read_error is not None:
-            raise self.read_error
-        if path not in self.files:
-            raise FileNotFoundError(path)
-        return self.files[path]
+    def open(self, path: str, mode: str = "r") -> FakeSftpFile:
+        """Mirror asyncssh.SFTPClient.open: regular function returning an async file."""
+        self.open_calls.append((path, mode))
+        error = self.read_error
+        if error is None and path not in self.files:
+            error = FileNotFoundError(path)
+        handle = FakeSftpFile(
+            self.files.get(path, b""),
+            error=error,
+            read_delay=self.read_delay,
+        )
+        self.handles.append(handle)
+        return handle
 
     async def remove(self, path: str) -> None:
         if self.remove_delay > 0:
@@ -155,6 +195,30 @@ async def test_async_ssh_capture_transport_connect_uses_required_args(tmp_path: 
     assert calls[0]["passphrase"] == "secret"
 
 
+async def test_async_ssh_capture_transport_reads_via_real_sftp_open_api(tmp_path: Path) -> None:
+    """Guard against reintroducing sftp.read(), which asyncssh 2.24 does not expose."""
+    assert not hasattr(asyncssh.SFTPClient, "read")
+    assert hasattr(asyncssh.SFTPClient, "open")
+    assert hasattr(asyncssh.SFTPClientFile, "__aenter__")
+    assert inspect.iscoroutinefunction(asyncssh.SFTPClientFile.read)
+
+    remote_path = "/tmp/lg_smtv_cap_1.jpg"
+    sftp = FakeSftpClient(files={remote_path: b"jpeg"})
+    conn = FakeSshConnection(sftp)
+
+    async def fake_connect(**kwargs: Any) -> FakeSshConnection:
+        _ = kwargs
+        return conn
+
+    transport = AsyncSshCaptureTransport(_make_config(tmp_path), connect_fn=fake_connect)
+    data = await transport.read_and_remove(remote_path)
+
+    assert data == b"jpeg"
+    assert sftp.open_calls == [(remote_path, "rb")]
+    assert len(sftp.handles) == 1
+    assert sftp.handles[0].closed is True
+
+
 async def test_async_ssh_capture_transport_sweeps_on_initial_connect_and_reconnect(
     tmp_path: Path,
 ) -> None:
@@ -248,12 +312,7 @@ async def test_async_ssh_capture_transport_closes_connection_when_start_sftp_cli
 async def test_async_ssh_capture_transport_enforces_read_timeout(
     tmp_path: Path,
 ) -> None:
-    class HangingSftp(FakeSftpClient):
-        async def read(self, path: str) -> bytes:
-            await asyncio.sleep(10.0)
-            return b"never"
-
-    sftp = HangingSftp(files={"/tmp/lg_smtv_cap_1.jpg": b"bytes"})
+    sftp = FakeSftpClient(files={"/tmp/lg_smtv_cap_1.jpg": b"bytes"}, read_delay=10.0)
     conn = FakeSshConnection(sftp)
 
     async def fake_connect(**kwargs: Any) -> FakeSshConnection:

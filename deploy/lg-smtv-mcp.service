@@ -2,6 +2,8 @@
 Description=LG webOS Smart TV MCP server
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=60s
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -12,6 +14,22 @@ Environment="PATH=<NixBinDir>:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:
 ExecStart=/usr/bin/env nix develop --command python -m lg_smtv_mcp serve
 Restart=on-failure
 RestartSec=5s
+
+# Sandboxing baseline (Issue #17)
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077
+ProtectSystem=full
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
 
 [Install]
 WantedBy=multi-user.target

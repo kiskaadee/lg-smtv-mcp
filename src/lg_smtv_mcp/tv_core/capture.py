@@ -102,7 +102,8 @@ class AsyncSshCaptureTransport:
         try:
             async with asyncio.timeout(timeout):
                 sftp = await self._ensure_sftp(exclude=remote_path)
-                data = await sftp.read(remote_path)
+                async with sftp.open(remote_path, "rb") as handle:
+                    data = await handle.read()
                 return bytes(data)
         except asyncssh.Error, OSError:
             await self._close_handles()

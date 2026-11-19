@@ -7,7 +7,7 @@ A Python Model Context Protocol (MCP) server for persistent, local-network contr
 The server is deliberately **LLM-free**: it exposes bounded, deterministic operations so external AI agents (such as Antigravity, Claude, or a vision-guided decision loop) can reason over UI state and control the television without embedding model APIs into the daemon.
 
 > **Status: M2 delivered — capture, E2E hardening, and `systemd` deployment.**
-> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)), and Developer Mode SFTP screenshot capture ([`capture.py`](src/lg_smtv_mcp/tv_core/capture.py)) are implemented and tested. Milestone M2 is delivered; `systemd` unit sandboxing hardening is tracked separately in [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17).
+> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)), and Developer Mode SFTP screenshot capture ([`capture.py`](src/lg_smtv_mcp/tv_core/capture.py)) are implemented and tested. Milestone M2 is delivered; `systemd` unit sandboxing hardening is implemented in [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17).
 
 ---
 
@@ -190,6 +190,25 @@ The repository includes a unit template at [`deploy/lg-smtv-mcp.service`](deploy
    ```
 
 The HTTP server binds to `127.0.0.1` by default and requires `MCP_BEARER_TOKEN`. Use a trusted reverse proxy or VPN if clients need remote access. When exposing the server remotely, set **both** `HOST=0.0.0.0` (or the LAN bind address) **and** `ALLOWED_HOSTS=<proxy-or-vpn-hostname>` in `.env`; the DNS-rebinding check in `auth.py` rejects any request whose `Host` header is not in the allowlist.
+
+### Sandboxing & Security Profile
+
+The unit template includes a tested systemd sandboxing baseline (Issue [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17)), reducing the `systemd-analyze --offline=yes security` exposure score from **9.0 UNSAFE** to **4.9 OK**:
+
+- **Adopted Directives:**
+  - `StartLimitIntervalSec=60s` / `StartLimitBurst=5`: Bounded restart budget prevents runaway restart loops on persistent environment errors (e.g. missing `.env`).
+  - `NoNewPrivileges=yes`: Prevents process escalation or setuid execution.
+  - `PrivateTmp=yes`: Restricts `/tmp` visibility to an isolated per-service namespace.
+  - `UMask=0077`: Ensures files created by the service are private to the service user.
+  - `ProtectSystem=full`: Mounts `/usr`, `/boot`, and `/etc` read-only.
+  - `ProtectControlGroups=yes`, `ProtectKernelModules=yes`, `ProtectKernelTunables=yes`, `ProtectKernelLogs=yes`, `ProtectClock=yes`, `ProtectHostname=yes`: Prevents tampering with kernel and OS interfaces.
+  - `RestrictRealtime=yes`, `RestrictSUIDSGID=yes`, `LockPersonality=yes`: Restricts privilege escalation vectors.
+  - `CapabilityBoundingSet=`: Drops all Linux kernel capabilities.
+
+- **Rejected Directives (Compatibility Constraints):**
+  - `ProtectHome=yes` / `ProtectHome=read-only`: Ruled out because `nix develop` requires read-write access to `~/.cache/nix/fetcher-locks` for flake evaluation, and the repository checkout resides under the operator's user directory.
+  - `ProtectSystem=strict`: Ruled out because it mounts the entire filesystem read-only, including the operator's home directory and the repository checkout; `nix develop` needs write access to `~/.cache/nix/fetcher-locks` for flake evaluation (the same constraint that rules out `ProtectHome`). Writable `/tmp` is not the blocker: with `PrivateTmp=yes`, systemd keeps `/tmp` and `/var/tmp` writable even under `strict`.
+  - `PrivateNetwork=yes`: Ruled out because the MCP daemon must communicate over the local network to the TV via SSAP (`wss://:3001`), Developer Mode SSH/SFTP (`:9922`), and Wake-on-LAN UDP broadcasts.
 
 ### Developer Mode SSH Capture Setup
 

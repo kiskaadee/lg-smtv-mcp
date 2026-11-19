@@ -25,6 +25,10 @@
         ps.pytest-asyncio
       ];
 
+      testTools = [
+        pkgs.systemd
+      ];
+
       pythonEnv = pkgs.python3.withPackages (_: runtimeDeps ++ testDeps);
     in
     {
@@ -39,7 +43,7 @@
           ps.pytestCheckHook
           pkgs.ruff
           pkgs.pyright
-        ] ++ testDeps;
+        ] ++ testDeps ++ testTools;
         preCheck = ''
           ruff check .
           ruff format --check .
@@ -52,7 +56,7 @@
           pythonEnv
           pkgs.pyright
           pkgs.ruff
-        ];
+        ] ++ testTools;
         shellHook = ''
           export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
           if [ -d .git ] && [ -d .githooks ]; then
