@@ -2,17 +2,16 @@
 
 ## Current Direction
 
-`lg-smtv-mcp` has completed Milestone M2 (capture, E2E hardening, and systemd deployment packaging). Active work is the `systemd` unit sandboxing hardening follow-up ([#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17), Backlog) and the live-TV operator smoke verification.
+`lg-smtv-mcp` has completed Milestone M2 (capture, E2E hardening, and systemd deployment packaging) and the post-M2 `systemd` unit sandboxing hardening follow-up ([#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17), PR [#18](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/18)). Active work is live-TV operator smoke verification (and downstream Canopy deployment).
 
 ## Near Term
-
-- **Systemd Unit Sandboxing Hardening ([#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17)):** Tighten the `deploy/lg-smtv-mcp.service` sandbox directives (`PrivateTmp`, `ProtectSystem`, capability drops, etc.) as a post-M2 hardening pass.
-
-## Medium Term
 
 - **Live-TV Operator Smoke Verification:** Execute the manual LAN smoke checklist in [`README.md`](README.md#operator-live-tv-e2e-smoke-test-checklist) and Developer Mode capture verification against the target `WebOS/4.1.0` TV.
 
 ## Completed
+
+### Post-M2 Hardening (Completed 2026-11-18)
+- **#17 (PR [#18](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/18)):** Hardened [`deploy/lg-smtv-mcp.service`](deploy/lg-smtv-mcp.service) with bounded restart throttling (`StartLimitIntervalSec=60s`, `StartLimitBurst=5`) and a 14-directive sandboxing baseline (`9.0 UNSAFE` → `4.9 OK`), added automated `systemd-analyze` tests in [`tests/test_deploy.py`](tests/test_deploy.py), documented adopted/rejected directives in [`README.md`](README.md#sandboxing--security-profile), and fixed `asyncssh` SFTP capture reads (`sftp.open()`) in [`src/lg_smtv_mcp/tv_core/capture.py`](src/lg_smtv_mcp/tv_core/capture.py).
 
 ### M2: Capture, E2E Hardening & Systemd Deployment (Completed 2026-11-17)
 - **#11 (PR [#14](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/14)):** E2E harness hardening in [`tests/test_e2e_mvp.py`](tests/test_e2e_mvp.py) — fast-fail ASGI lifespan startup, `elapsed_ms` contract check, and post-`turn_off()` `1008` -> `get_state` stale parity.

@@ -267,7 +267,7 @@ All tools return structured JSON payloads (plus inline MCP `ImageContent` when `
 
 ## Detailed Implementation Plan
 
-Milestone M1 foundations (`#1`–`#4`) and all Milestone M2 slices (`#11`, `#12`, `#13`) are implemented, verified, and merged on `main`. The completed baselines are summarized for reference below. Follow-up `systemd` unit sandboxing hardening is tracked separately in [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17).
+Milestone M1 foundations (`#1`–`#4`), all Milestone M2 slices (`#11`, `#12`, `#13`), and the post-M2 `systemd` unit sandboxing hardening follow-up ([#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17), PR [#18](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/18)) are implemented, verified, and merged on `main`. The completed baselines are summarized for reference below.
 
 ### Completed Milestone M1 Baseline (`#1`–`#4`, Merged on `main`)
 
@@ -334,7 +334,7 @@ Delivered by `#12` (PR [#15](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/p
 *   **Delivered Changes:**
     *   Created `deploy/lg-smtv-mcp.service` template invoking `nix develop --command python -m lg_smtv_mcp serve` with `<User>`, `<WorkingDirectory>`, `EnvironmentFile`, `Restart=on-failure`, and `PATH` containing `<NixBinDir>`.
     *   Updated `README.md` with `systemd` setup instructions, Developer Mode pairing workflow (`python -m lg_smtv_mcp pair --fetch-ssh-key`), DNS-rebinding host configuration (`HOST` + `ALLOWED_HOSTS`), and live-TV operator smoke checklist items.
-    *   Follow-up unit sandboxing hardening is tracked separately in issue [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17).
+    *   Follow-up unit sandboxing hardening was delivered in issue [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17) (PR [#18](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/18)), adding bounded restart limits, a 14-directive sandboxing baseline (`9.0 UNSAFE` → `4.9 OK`), automated `systemd-analyze` verification in `tests/test_deploy.py`, and the `asyncssh` SFTP `open()` capture fix.
 
 *   **M2 Delivery Checkpoint:** All checks (`ruff`, `pyright`, `pytest`, `nix flake check`) passed; PR #16 merged on `main`.
 
