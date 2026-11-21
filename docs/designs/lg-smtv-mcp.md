@@ -3,7 +3,7 @@
 *   **Author:** kiskaadee
 *   **Status:** Approved
 *   **Date:** 2026-11-15
-*   **Last reconciled:** 2026-11-17 (M2 fully delivered: `#13` / PR [#16](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/16) merged; Milestone M2 closed)
+*   **Last reconciled:** 2026-11-21 (M2.1 `#20` / PR [#24](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/pulls/24) merged on `main`)
 
 --------------------------------------------------------------------------------
 
@@ -77,12 +77,12 @@ All runtime code lives under `src/lg_smtv_mcp/`, separating the transport/protoc
 
 | Module | Responsibility |
 | :--- | :--- |
-| [`src/lg_smtv_mcp/config.py`](../../src/lg_smtv_mcp/config.py) | Frozen Pydantic v2 `TvConfig` (`extra="forbid"`) loaded from env vars / `.env` (`TV_IP`, `TV_MAC`, `WOL_BROADCAST`, `CLIENT_KEY_PATH`, `SSH_KEY_PATH`, `WEBOS_SSH_PASSPHRASE`, `SSH_KNOWN_HOSTS_PATH`, `HOST`, `PORT`, `ALLOWED_HOSTS`, `MCP_BEARER_TOKEN`, `MAX_VOLUME`, `ENABLE_RAW_SSAP`), raising `ConfigError` on invalid operator config. |
+| [`src/lg_smtv_mcp/config.py`](../../src/lg_smtv_mcp/config.py) | Frozen Pydantic v2 `TvConfig` (`extra="forbid"`) loaded from env vars / `.env` (`TV_IP`, `TV_MAC`, `WOL_BROADCAST`, `CLIENT_KEY_PATH`, `SSH_KEY_PATH`, `WEBOS_SSH_PASSPHRASE`, `SSH_KNOWN_HOSTS_PATH`, `HOST`, `PORT`, `ALLOWED_HOSTS`, `MCP_BEARER_TOKEN`, `MAX_VOLUME`, `ENABLE_RAW_SSAP`, `CAPTURE_MAX_WIDTH`, `CAPTURE_JPEG_QUALITY`), raising `ConfigError` on invalid operator config. |
 | [`src/lg_smtv_mcp/errors.py`](../../src/lg_smtv_mcp/errors.py) | `ConfigError` for startup/config failures and `TvError(ErrorCode, message)` for runtime TV/tool errors (`TV_OFFLINE_STANDBY`, `PAIRING_REQUIRED`, `SCREENSHOT_UNAVAILABLE`, `LOCK_TIMEOUT`, `WAKE_TIMEOUT`, `COMMAND_FAILED`, `INVALID_ARGUMENT`). |
 | [`src/lg_smtv_mcp/tv_core/protocols.py`](../../src/lg_smtv_mcp/tv_core/protocols.py) | Python `Protocol` interfaces (`WebSocketTransport`, `WebSocketConnectFn`, `WebSocketClosedError`, `CaptureTransport`, `FrameCapturer`) and frozen result dataclasses enabling offline contract tests. |
 | [`src/lg_smtv_mcp/tv_core/ssap.py`](../../src/lg_smtv_mcp/tv_core/ssap.py) | `SsapClient`: single background reader task routing frames by `msg["id"]` to `asyncio.Future`s and `subscribe` callbacks; `PERMISSIONS` constant; `register` + `1008` detection; WebSocket keepalive and pending-`Future` cleanup on disconnect. |
 | [`src/lg_smtv_mcp/tv_core/pointer.py`](../../src/lg_smtv_mcp/tv_core/pointer.py) | `PointerClient`: acquires `getPointerInputSocket`, normalizes/validates keys, sends plain-text `type:button` frames, and automatically re-acquires the socket if dropped. |
-| [`src/lg_smtv_mcp/tv_core/capture.py`](../../src/lg_smtv_mcp/tv_core/capture.py) | `CaptureClient` (implementing `FrameCapturer`) and `AsyncSshCaptureTransport` (implementing `CaptureTransport`): calls `executeOneShot` via `ssap_request_fn`, lazily opens/reuses the `asyncssh` SFTP session (`read_and_remove`, `sweep_temp_files`, `close`), excludes the in-flight capture from each session sweep, enforces the shared deadline and shielded cleanup, and tracks `frame_sha256` / `changed_since_last`. |
+| [`src/lg_smtv_mcp/tv_core/capture.py`](../../src/lg_smtv_mcp/tv_core/capture.py) | `CaptureClient` (implementing `FrameCapturer`) and `AsyncSshCaptureTransport` (implementing `CaptureTransport`): calls `executeOneShot` via `ssap_request_fn`, lazily opens/reuses the `asyncssh` SFTP session (`read_and_remove`, `sweep_temp_files`, `close`), maps `KeyImportError` to `SCREENSHOT_UNAVAILABLE`, excludes the in-flight capture from each session sweep, enforces the shared deadline and shielded cleanup, optionally downscales/recompresses JPEGs (`max_width`, `jpeg_quality`) via Pillow, and tracks `frame_sha256` / `changed_since_last`. |
 | [`src/lg_smtv_mcp/tv_core/manager.py`](../../src/lg_smtv_mcp/tv_core/manager.py) | `TvManager`: single-owner connection loop + state machine, `send_wol` helper, `subscribe` state cache, stepped reconnect backoff, `FrameCapturer` teardown on `STANDBY_OFFLINE`, `.client_key.json` reload on `PAIRING_REQUIRED` backoff/`SIGHUP`, and `ui_lock` (`25s` acquire timeout) serializing UI/capture operations. |
 | [`src/lg_smtv_mcp/auth.py`](../../src/lg_smtv_mcp/auth.py) | ASGI Bearer token middleware (`hmac.compare_digest` on `Authorization: Bearer <token>`) wrapping FastMCP's `streamable_http_app()` and `TransportSecuritySettings`. |
 | [`src/lg_smtv_mcp/server.py`](../../src/lg_smtv_mcp/server.py) | FastMCP (`MCPServer`) tool definitions, `ImageContent` formatting, partial-success shaping, `max_volume` enforcement, `ENABLE_RAW_SSAP` gating, and ASGI `lifespan` wiring for `TvManager` + `SIGHUP`. |

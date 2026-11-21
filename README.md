@@ -8,8 +8,8 @@ A Python Model Context Protocol (MCP) server for persistent, local-network contr
 
 The server is deliberately **LLM-free**: it exposes bounded, deterministic operations so external AI agents (such as Antigravity, Claude, or a vision-guided decision loop) can reason over UI state and control the television without embedding model APIs into the daemon.
 
-> **Status: M2 delivered — capture, E2E hardening, and `systemd` deployment.**
-> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)), and Developer Mode SFTP screenshot capture ([`capture.py`](src/lg_smtv_mcp/tv_core/capture.py)) are implemented and tested. Milestone M2 is delivered; `systemd` unit sandboxing hardening is implemented in [#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17).
+> **Status: M2 delivered — M2.1 live-TV polish in progress.**
+> Configuration validation, error taxonomy, [`tv_core`](src/lg_smtv_mcp/tv_core/) (SSAP multiplexer, `PointerClient`, `TvManager`), FastMCP server & Bearer auth ([`server.py`](src/lg_smtv_mcp/server.py), [`auth.py`](src/lg_smtv_mcp/auth.py)), `pair` / `serve` CLI ([`cli.py`](src/lg_smtv_mcp/cli.py)), full-stack offline E2E verification ([`test_e2e_mvp.py`](tests/test_e2e_mvp.py)), Developer Mode SFTP screenshot capture with optional host-side JPEG downscaling ([`capture.py`](src/lg_smtv_mcp/tv_core/capture.py)), and `systemd` unit sandboxing hardening ([#17](https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp/issues/17)) are implemented on `main`. Ongoing M2.1 polish is tracked in [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -63,7 +63,8 @@ Implementation is tracked on the [Project Pipeline](https://gitea.roadtotech.me/
 | Milestone | Scope | Status |
 | :--- | :--- | :--- |
 | **M1** | Core config, `tv_core` engine, FastMCP tools, Bearer auth, `pair`/`serve` CLI, E2E verification | Complete (`#1`–`#4` merged on `main`) |
-| **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, E2E test hardening | Delivered — capture (`#12`), E2E hardening (`#11`), and systemd deployment (`#13`); unit sandboxing hardening tracked in `#17` |
+| **M2** | Developer Mode SFTP screenshot capture (`asyncssh`), systemd unit, E2E test hardening, sandboxing | Complete (`#11`–`#13`, `#17` merged on `main`) |
+| **M2.1** | Host-side JPEG downscaling (`#20`), immediate `turn_off` standby (`#21`), Nix sandbox tests (`#22`), settle retry (`#23`) | In progress (`#20` merged; `#21`–`#23` open) |
 
 Implemented in [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) and exposed via [`server.py`](src/lg_smtv_mcp/server.py):
 - Persistent SSAP multiplexing and `subscribe`-backed state snapshots (`get_state`: `volume`, `muted`, `sound_output`, `foreground_app`)
@@ -73,13 +74,19 @@ Implemented in [`TvManager`](src/lg_smtv_mcp/tv_core/manager.py) and exposed via
 
 ---
 
-## Requirements & Tested Hardware
+## Prerequisites & Tested Hardware
 
-- **Runtime:** Python 3.14+ (or Nix with Flakes enabled)
-- **Hardware:** An LG webOS Smart TV reachable on the local network (with Wake-on-LAN and LG Connect Apps enabled for power-on and SSAP control)
-- **Optional:** LG Developer Mode enabled for SSH/SFTP screenshot capture
+Before running the server, make sure you have:
 
-Initial protocol exploration and empirical verification were performed against:
+- **Host Runtime:** Nix with Flakes enabled (recommended) or Python `3.14+`
+- **Network:** Host and LG webOS Smart TV on the **same local network** (Wake-on-LAN uses UDP broadcast; SSAP uses `wss://<TV_IP>:3001`)
+- **LG webOS TV Settings:**
+  - **LG Connect Apps** enabled (*Settings -> General -> Devices -> External Devices -> LG Connect Apps*, or *Network -> LG Connect Apps* depending on webOS version)
+  - **Wake-on-LAN / Mobile TV On** enabled (*Turn On via Wi-Fi / Network*) if you want `tv_wake` to power on the TV from standby
+  - **Static IP / DHCP reservation** (recommended) and the TV's **MAC address**
+- **Optional (for Screenshots):** An LG Developer account and the **Developer Mode** app installed on the TV with **Dev Mode Status** and **Key Server** enabled (SSH/SFTP on port `9922`)
+
+Initial protocol exploration and live-TV verification were performed against:
 - **Device:** `65UR8750PSA`
 - **Platform:** `WebOS/4.1.0`
 
@@ -87,9 +94,11 @@ Compatibility with other LG webOS models and firmware versions has not yet been 
 
 ---
 
-## Development Setup
+## Getting Started (Step-by-Step)
 
-This repository uses Nix Flakes ([flake.nix](flake.nix)) for reproducible environments:
+### Step 1: Prepare the Host Environment
+
+Clone the repository and enter the Nix devShell ([`flake.nix`](flake.nix)):
 
 ```bash
 git clone https://gitea.roadtotech.me/kiskaadee/lg-smtv-mcp.git
@@ -99,33 +108,84 @@ nix develop
 
 If you use `direnv`, run `direnv allow` to activate [`.envrc`](.envrc) automatically.
 
-The shell provisions Python 3.14, `websockets`, `mcp`, `pydantic`, `asyncssh`, `uvicorn`, `httpx`, `pytest`, `pytest-asyncio`, `ruff`, and `pyright`, and configures `.githooks/` as the Git hooks path.
+The shell provisions Python 3.14, `websockets`, `mcp`, `pydantic`, `asyncssh`, `uvicorn`, `pillow`, `httpx`, `pytest`, `pytest-asyncio`, `ruff`, and `pyright`, and configures `.githooks/` as the Git hooks path.
 
----
+> **Note:** Inside `nix develop`, run commands using `python -m lg_smtv_mcp <subcommand>` (or `nix run . -- <subcommand>`), as the devShell provisions the Python environment directly rather than installing package console scripts to `PATH`.
 
-## Configuration
+### Step 2: Create and Configure `.env`
 
-Runtime configuration is loaded by [`load_config()`](src/lg_smtv_mcp/config.py) from process environment variables with `.env` fallback (existing process environment variables always take precedence). See [`.env.example`](.env.example):
+Copy [`.env.example`](.env.example) to `.env` and fill in your TV's IP, MAC address, and a freshly generated Bearer token (never commit `.env`, `.client_key.json`, or SSH keys):
 
 ```bash
 cp .env.example .env
+openssl rand -hex 32   # use output as MCP_BEARER_TOKEN
 ```
 
-Edit `.env` with your TV's local network coordinates and a generated Bearer token (never commit `.env` or `.client_key.json`):
+Minimal `.env` for local use:
 
 ```dotenv
 TV_IP=<TV_IP>
 TV_MAC=<TV_MAC>
-MCP_BEARER_TOKEN=<GENERATE_TOKEN>
+MCP_BEARER_TOKEN=<GENERATED_TOKEN>
 HOST=127.0.0.1
 PORT=8765
 MAX_VOLUME=40
 ```
 
+If you enable Developer Mode screenshots, also consider setting `CAPTURE_MAX_WIDTH=480` and `CAPTURE_JPEG_QUALITY=55` (as in [`.env.example`](.env.example)) so screenshots stay compact enough for inline MCP delivery without disk offloading.
+
+### Step 3: Pair with the TV (One-Time)
+
+Power **on** the TV and ensure *LG Connect Apps* is enabled. Then run:
+
+```bash
+python -m lg_smtv_mcp pair
+# Or override TV_IP:
+python -m lg_smtv_mcp pair --ip <TV_IP>
+```
+
+If you also want **Developer Mode screenshot capture**, enable *Developer Mode* and *Key Server* in the TV's Developer Mode app first, then run:
+
+```bash
+python -m lg_smtv_mcp pair --fetch-ssh-key
+```
+
+Accept the pairing prompt on the TV screen using your physical remote:
+- The SSAP client key is saved atomically with `0600` permissions to `CLIENT_KEY_PATH` (default `.client_key.json`).
+- `--fetch-ssh-key` downloads the Developer Mode private key from `http://<TV_IP>:9991/webos_rsa` and saves it with `0600` permissions (default `.webos_rsa`). Set `SSH_KEY_PATH=.webos_rsa` (and `WEBOS_SSH_PASSPHRASE` if configured) in `.env`.
+
+### Step 4: Start the MCP Server
+
+```bash
+# Default: persistent Streamable HTTP daemon at http://<HOST>:<PORT>/mcp
+# Requires Authorization: Bearer <MCP_BEARER_TOKEN>
+python -m lg_smtv_mcp serve
+
+# Local testing over stdio (no HTTP Bearer token required)
+python -m lg_smtv_mcp serve --transport stdio
+```
+
+If you re-pair while `serve` is running, send `SIGHUP` to reload `.client_key.json` without restarting the daemon.
+
+### Step 5: Connect Your MCP Client
+
+Point your MCP host/client at the Streamable HTTP endpoint:
+
+- **URL:** `http://<HOST>:<PORT>/mcp` (default `http://127.0.0.1:8765/mcp`)
+- **Header:** `Authorization: Bearer <MCP_BEARER_TOKEN>`
+
+If your MCP client runs on a different machine than the server, set **both** `HOST=0.0.0.0` (or the server's LAN IP) **and** `ALLOWED_HOSTS=<server-lan-ip-or-hostname>` in `.env`, and place the server behind an HTTPS reverse proxy or encrypted tunnel (e.g., WireGuard/Tailscale) if crossing untrusted networks.
+
+---
+
+## Configuration Reference
+
+Runtime configuration is loaded by [`load_config()`](src/lg_smtv_mcp/config.py) from process environment variables with `.env` fallback (existing process environment variables always take precedence).
+
 | Variable | Purpose | Default / Requirement |
 | :--- | :--- | :--- |
 | `TV_IP` | Target TV IPv4 address | Required |
-| `TV_MAC` | Target TV MAC address for Wake-on-LAN | Required for `wake` |
+| `TV_MAC` | Target TV MAC address for Wake-on-LAN | Required for `tv_wake` |
 | `WOL_BROADCAST` | Wake-on-LAN UDP broadcast IPv4 address | `255.255.255.255` |
 | `CLIENT_KEY_PATH` | SSAP pairing client-key JSON path | `.client_key.json` |
 | `SSH_KEY_PATH` | Optional Developer Mode SSH private key path | Unset |
@@ -137,35 +197,8 @@ MAX_VOLUME=40
 | `MCP_BEARER_TOKEN` | Bearer token for `streamable-http` transport | Required for HTTP |
 | `MAX_VOLUME` | Upper bound guardrail (`0..100`) for `set_volume` | `40` |
 | `ENABLE_RAW_SSAP` | Enables optional `raw_ssap` pass-through (`true`/`false`) | `false` |
-
----
-
-## Running the MVP Server (`pair` & `serve`)
-
-> **Note:** Inside `nix develop`, run commands using `python -m lg_smtv_mcp <subcommand>` (or `nix run . -- <subcommand>`), as the devShell provisions the Python environment directly rather than installing package console scripts to `PATH`.
-
-1. **Pair with the TV (one-time per TV):** Ensure the TV is powered on with *LG Connect Apps* enabled, then run:
-
-   ```bash
-   python -m lg_smtv_mcp pair
-   # Optional: override IP or also fetch Developer Mode SSH key
-   python -m lg_smtv_mcp pair --ip <TV_IP>
-   ```
-
-   Accept the pairing prompt on the TV screen. The client key is saved atomically with `0600` permissions to `CLIENT_KEY_PATH` (default `.client_key.json`).
-
-2. **Start the MCP server:**
-
-   ```bash
-   # Default: persistent Streamable HTTP daemon at http://<HOST>:<PORT>/mcp
-   # Requires Authorization: Bearer <MCP_BEARER_TOKEN>
-   python -m lg_smtv_mcp serve
-
-   # Local testing over stdio (no HTTP Bearer token required)
-   python -m lg_smtv_mcp serve --transport stdio
-   ```
-
-   If you re-pair while `serve` is running, send `SIGHUP` to reload `.client_key.json` without restarting the daemon.
+| `CAPTURE_MAX_WIDTH` | Optional max width (`64..3840`) for host-side JPEG downscaling | Unset (raw passthrough) |
+| `CAPTURE_JPEG_QUALITY` | Optional JPEG quality (`1..95`; defaults to `75` if only `CAPTURE_MAX_WIDTH` is set) | Unset (raw passthrough) |
 
 ---
 
@@ -264,9 +297,10 @@ nix flake check
 ## Documentation
 
 - [Architecture](ARCHITECTURE.md) — Canonical present-state system topology, components, and boundaries
-- [Roadmap](ROADMAP.md) — Completed M1/M2 milestones and remaining M2 delivery trajectory
+- [Roadmap](ROADMAP.md) — Completed M1/M2 milestones and active M2.1 delivery trajectory
 - [Decision Records](docs/adr/) — MADR records for core architectural choices (`0001`–`0005`)
 - [Architecture & Design RFC](docs/designs/lg-smtv-mcp.md) — Component contracts, state machine, error taxonomy, and implementation plan
+- [E2E Benchmarks](docs/experiments/crunchyroll-e2e-comparison.md) — Standardized live-TV Crunchyroll navigation telemetry (baseline vs. post-`#20`)
 - [Verified Capabilities](docs/poc/capabilities.md) — Empirical SSAP, DIAL, deep-link, and Developer Mode findings
 - [Crunchyroll E2E Experiment](docs/poc/crunchyroll-e2e-experiment.md) — Initial vision-guided navigation experiment and latency measurements
 - [Agent & Engineering Guidelines](AGENTS.md) — Coding standards, validation boundaries, protocol invariants, and CI rules
