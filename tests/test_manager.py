@@ -808,3 +808,149 @@ async def test_manager_raw_ssap_forwards_request_when_enabled(tmp_path: Path) ->
 
     assert resp == {"returnValue": True, "ok": 1}
     assert sent_requests == [("ssap://system/getSystemInfo", {"x": 1})]
+
+
+async def test_manager_turn_off_transitions_immediately_to_standby_and_tears_down_transports(
+    tmp_path: Path,
+) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+    ssap_transports: list[FakeWebSocketTransport] = []
+    pointer_ws = FakeWebSocketTransport()
+
+    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
+        uri = msg["uri"]
+        if uri == "ssap://com.webos.service.networkinput/getPointerInputSocket":
+            _pointer_socket_reply(msg, ws)
+            return
+        sent_requests.append((uri, msg["payload"]))
+        ws.push_json({"type": "response", "id": msg["id"], "payload": {"returnValue": True}})
+
+    async def connect_fn(url: str) -> FakeWebSocketTransport:
+        if url == POINTER_URL:
+            return pointer_ws
+        ws = _make_online_transport(on_request=on_request)
+        ssap_transports.append(ws)
+        return ws
+
+    capturer = _FakeCapturer()
+    mgr = TvManager(
+        _make_config(tmp_path),
+        connect_fn=connect_fn,
+        capture_client=capturer,
+        backoff_steps=(10.0,),
+    )
+    async with _started(mgr):
+        await mgr.send_keys(["ENTER"], delay_ms=0)
+        resp = await mgr.turn_off()
+
+        assert resp == {"returnValue": True}
+        assert mgr.state is ConnectionState.STANDBY_OFFLINE
+        snapshot = mgr.get_state()
+        assert snapshot.connected is False
+        assert snapshot.stale is True
+        assert snapshot.volume == 22
+        assert snapshot.muted is False
+        assert snapshot.sound_output == "tv_speaker"
+        assert snapshot.foreground_app == "com.webos.app.livetv"
+        assert ssap_transports[0].closed is True
+        assert pointer_ws.closed is True
+        assert capturer.closed_count >= 1
+
+        with pytest.raises(TvError) as exc_info:
+            await mgr.set_volume(10)
+        assert exc_info.value.code is ErrorCode.TV_OFFLINE_STANDBY
+
+
+async def test_manager_turn_off_allows_immediate_wake_with_wol_and_reconnection(
+    tmp_path: Path,
+) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+    wol_calls: list[tuple[str, str, int]] = []
+    connect_count = 0
+
+    def fake_wol(mac: str, broadcast_addr: str, port: int) -> None:
+        wol_calls.append((mac, broadcast_addr, port))
+
+    async def connect_fn(_url: str) -> FakeWebSocketTransport:
+        nonlocal connect_count
+        connect_count += 1
+        return _recording_transport(sent_requests)
+
+    mgr = TvManager(
+        _make_config(tmp_path),
+        connect_fn=connect_fn,
+        wol_fn=fake_wol,
+        backoff_steps=(10.0,),
+        wake_poll_interval=0.01,
+        wake_timeout=2.0,
+    )
+    async with _started(mgr):
+        await mgr.turn_off()
+        status = await mgr.wake()
+
+        assert status.status == "connected"
+        assert wol_calls == [("00:11:22:33:44:55", "255.255.255.255", 9)]
+        assert connect_count == 2
+        assert mgr.state is ConnectionState.CONNECTED
+
+
+@pytest.mark.parametrize(
+    ("turn_off_payload", "expect_error"),
+    [
+        ({"returnValue": False}, True),
+        ({}, False),
+        ({"returnValue": None}, False),
+    ],
+)
+async def test_manager_turn_off_leaves_state_and_transports_untouched_when_return_value_not_true(
+    tmp_path: Path, turn_off_payload: dict[str, Any], expect_error: bool
+) -> None:
+    sent_requests: list[tuple[str, dict[str, Any]]] = []
+    ssap_transports: list[FakeWebSocketTransport] = []
+    pointer_ws = FakeWebSocketTransport()
+
+    def on_request(msg: dict[str, Any], ws: FakeWebSocketTransport) -> None:
+        uri = msg["uri"]
+        if uri == "ssap://com.webos.service.networkinput/getPointerInputSocket":
+            _pointer_socket_reply(msg, ws)
+            return
+        sent_requests.append((uri, msg["payload"]))
+        if uri == "ssap://system/turnOff":
+            ws.push_json({"type": "response", "id": msg["id"], "payload": turn_off_payload})
+            return
+        ws.push_json({"type": "response", "id": msg["id"], "payload": {"returnValue": True}})
+
+    async def connect_fn(url: str) -> FakeWebSocketTransport:
+        if url == POINTER_URL:
+            return pointer_ws
+        ws = _make_online_transport(on_request=on_request)
+        ssap_transports.append(ws)
+        return ws
+
+    capturer = _FakeCapturer()
+    mgr = TvManager(
+        _make_config(tmp_path),
+        connect_fn=connect_fn,
+        capture_client=capturer,
+        backoff_steps=(10.0,),
+    )
+    async with _started(mgr):
+        await mgr.send_keys(["ENTER"], delay_ms=0)
+        if expect_error:
+            with pytest.raises(TvError) as exc_info:
+                await mgr.turn_off()
+            assert exc_info.value.code is ErrorCode.COMMAND_FAILED
+        else:
+            resp = await mgr.turn_off()
+            assert resp == turn_off_payload
+
+        assert mgr.state is ConnectionState.CONNECTED
+        snapshot = mgr.get_state()
+        assert snapshot.connected is True
+        assert snapshot.stale is False
+        assert ssap_transports[0].closed is False
+        assert pointer_ws.closed is False
+        assert capturer.closed_count == 0
+
+        await mgr.set_volume(10)
+        assert ("ssap://audio/setVolume", {"volume": 10}) in sent_requests

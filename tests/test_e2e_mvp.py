@@ -120,10 +120,7 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
     wol_calls: list[tuple[str, str, int]] = []
     sent_requests: list[tuple[str, dict[str, Any]]] = []
     standby_backoff_entered = asyncio.Event()
-    turn_off_completed = asyncio.Event()
-    post_turn_off_standby_entered = asyncio.Event()
     pointer_ws = FakeWebSocketTransport()
-    online_ssap_connections: list[FakeWebSocketTransport] = []
 
     def fake_send_wol(mac: str, broadcast_addr: str, port: int) -> None:
         nonlocal tv_awake
@@ -131,10 +128,7 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
         tv_awake = True
 
     async def fake_wait_fn(event: asyncio.Event, timeout: float) -> None:
-        if turn_off_completed.is_set():
-            post_turn_off_standby_entered.set()
-        else:
-            standby_backoff_entered.set()
+        standby_backoff_entered.set()
         with suppress(TimeoutError):
             await asyncio.wait_for(event.wait(), timeout=timeout)
 
@@ -145,9 +139,7 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
             standby_ws = FakeWebSocketTransport()
             standby_ws.push_close(1008, "Try Again Later (EWS)")
             return standby_ws
-        online_ws = _build_online_ssap(tv_ip, sent_requests)
-        online_ssap_connections.append(online_ws)
-        return online_ws
+        return _build_online_ssap(tv_ip, sent_requests)
 
     manager = TvManager(
         config,
@@ -282,15 +274,12 @@ async def test_e2e_mvp_lifecycle_from_standby_through_clean_shutdown(tmp_path: P
             assert vol_res.is_error is False
             assert ("ssap://audio/setVolume", {"volume": 15}) in sent_requests
 
-            # 7. turn_off(): sends ssap://system/turnOff.
+            # 7. turn_off(): sends ssap://system/turnOff and transitions immediately to standby.
             off_res = await session.call_tool("turn_off", {})
             assert off_res.is_error is False
             assert ("ssap://system/turnOff", {}) in sent_requests
-            turn_off_completed.set()
-            online_ssap_connections[-1].push_close(1008, "Try Again Later (EWS)")
-            await asyncio.wait_for(post_turn_off_standby_entered.wait(), timeout=2.0)
 
-            # 8. Standby (1008) after turn_off: get_state returns cached stale values.
+            # 8. Immediate standby after turn_off (no 1008 needed): get_state returns stale cache.
             stale_state_res = await session.call_tool("get_state", {})
             assert stale_state_res.is_error is False
             stale_state_payload = _extract_json_text(stale_state_res.content)

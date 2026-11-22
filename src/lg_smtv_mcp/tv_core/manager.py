@@ -593,7 +593,13 @@ class TvManager:
     async def turn_off(self) -> dict[str, Any]:
         """Power off the TV into standby."""
         ssap = self._require_ssap()
-        return await ssap.request("ssap://system/turnOff", {})
+        response = await ssap.request("ssap://system/turnOff", {})
+        if response.get("returnValue") is True:
+            self.state = ConnectionState.STANDBY_OFFLINE
+            self._connected_event.clear()
+            await self._teardown_transports(close_capture=True)
+            self._on_ssap_disconnect(ErrorCode.TV_OFFLINE_STANDBY)
+        return response
 
     async def raw_ssap(self, uri: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         """Forward a raw SSAP request when enabled by configuration."""
